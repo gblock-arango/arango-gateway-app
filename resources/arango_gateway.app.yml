@@ -1,0 +1,6 @@
+resources:
+  apps:
+    arango_gateway:
+      name: arango-gateway-${bundle.target}
+      description: "Arango gateway (UC registry, embed proxy, graph import API)"
+      source_code_path: ..

@@ -1,0 +1,24 @@
+bundle:
+  name: arango-gateway-app
+
+include:
+  - resources/*.yml
+
+variables:
+  # Optional: use with ``databricks bundle deploy`` / CI to override literals in ``app.yaml``
+  # (requires bundle substitution wired into your pipeline). Direct ``deploy_agent.sh`` uses
+  # ``app.yaml`` defaults as deployed.
+  sql_warehouse_id:
+    description: "Databricks SQL warehouse id (hex)"
+    default: "473d40703241ee4c"
+  arango_registry_table:
+    default: "workspace.default.arango_connection_registry"
+  uc_graph_volume_name:
+    default: "arango_agent_volume"
+  uc_graph_snapshot_base:
+    default: ""
+
+targets:
+  dev:
+    default: true
+    mode: development

@@ -1,0 +1,64 @@
+command:
+  - "bash"
+  - "-lc"
+  - "export PYTHONPATH=src && gunicorn app:app --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} --workers 2 --timeout 660"
+
+# Default values match typical dev setup; override per workspace in the Databricks App UI or by
+# editing this file before deploy. ``databricks bundle deploy`` can still layer targets in
+# ``databricks.yml`` for alternate catalogs/warehouses when you wire substitution there later.
+
+env:
+  - name: DATABRICKS_SQL_WAREHOUSE_ID
+    description: "SQL Warehouse ID for Unity Catalog SQL (registry, graph metadata)."
+    value: "473d40703241ee4c"
+  - name: ARANGO_REGISTRY_TABLE
+    description: "Unity Catalog table storing Arango connection coordinates (catalog.schema.table); with UC_GRAPH_VOLUME_NAME drives default UC_GRAPH_SNAPSHOT_BASE when UC_GRAPH_SNAPSHOT_BASE is unset"
+    value: "workspace.default.arango_connection_registry"
+  - name: UC_GRAPH_VOLUME_NAME
+    description: "UC volume name under /Volumes/<catalog>/<schema>/ (catalog.schema from ARANGO_REGISTRY_TABLE)"
+    value: "arango_agent_volume"
+  - name: UC_GRAPH_SNAPSHOT_BASE
+    description: "Optional JSONL export base path; empty derives from ARANGO_REGISTRY_TABLE + UC_GRAPH_VOLUME_NAME"
+    value: ""
+  - name: ARANGO_REGISTRY_AUTO_CREATE
+    description: "If true, app creates schema/table on first registry call"
+    value: "true"
+  - name: ARANGO_PING_TIMEOUT_SECONDS
+    description: "Timeout in seconds for outbound Arango connectivity probe"
+    value: "5"
+  - name: ARANGO_PING_BASIC_AUTH_USER
+    description: "Optional user for Arango ping and embed proxy"
+    value: "root"
+  - name: ARANGO_PING_BASIC_AUTH_PASSWORD
+    description: "Arango basic-auth password (dev default matches single-node-arango-on-minikube; override in production)"
+    value: "8c1bc9344c886819859534a5ac951412c650870662228617cfbb69023489afd2"
+  - name: ARANGO_PING_TLS_VERIFY
+    description: "If false, skip TLS certificate verification (dev only)"
+    value: "true"
+  - name: ARANGO_DATABASE
+    description: "ArangoDB database name for UC graph bulk load"
+    value: "_system"
+  - name: ARANGO_UC_IMPORT_BATCH_SIZE
+    description: "Documents per HTTP batch when loading UC metadata into Arango"
+    value: "300"
+  - name: DEBUG_STARTUP_CHECKS
+    description: "If true, run startup diagnostics for UC registry + Arango reachability"
+    value: "true"
+  - name: DEBUG_WEBHOOK_URL
+    description: "Optional webhook URL for startup debug payloads"
+    value: ""
+  - name: ARANGO_UI_IFRAME_URL
+    description: "Optional override for Arango HTTP origin for embed proxy"
+    value: ""
+  - name: ARANGO_CONVERSATION_URL
+    description: "Optional URL for POST /api/arango/chat to forward to; empty => stub"
+    value: ""
+  - name: ARANGO_CONVERSATION_TIMEOUT_SECONDS
+    description: "HTTP timeout for outbound ARANGO_CONVERSATION_URL requests"
+    value: "120"
+
+resources:
+  - name: sql-warehouse
+    sql_warehouse:
+      id: ${DATABRICKS_SQL_WAREHOUSE_ID}
+      permission: CAN_USE
