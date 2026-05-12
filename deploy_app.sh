@@ -27,6 +27,7 @@ LOCAL_ARANGO_URL="${4:-https://127.0.0.1:18529}"
 CLUSTER_NAME="${5:-local-minikube-dev}"
 REGISTRY_TABLE="${6:-workspace.default.arango_connection_registry}"
 WAREHOUSE_ID="${7:-473d40703241ee4c}"
+ARANGO_GATEWAY_REGISTRY_TABLE="${ARANGO_GATEWAY_REGISTRY_TABLE:-workspace.default.arango_gateway_registry}"
 # Unity Catalog volume for gzip JSONL graph snapshots (/Volumes/<cat>/<schema>/<name>/uc_graph_snapshots).
 # Must match app env UC_GRAPH_VOLUME_NAME (default in app.yaml: arango_agent_volume).
 UC_GRAPH_VOLUME_NAME="${UC_GRAPH_VOLUME_NAME:-arango_agent_volume}"
@@ -250,6 +251,26 @@ echo "Ensuring UC graph snapshot volume ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.$
 run_sql_statement "CREATE VOLUME IF NOT EXISTS ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_VOLUME_NAME}"
 run_sql_statement "GRANT READ VOLUME, WRITE VOLUME ON VOLUME ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_VOLUME_NAME} TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
 
+echo
+echo "Publishing gateway app URL to Unity Catalog (${ARANGO_GATEWAY_REGISTRY_TABLE})..."
+_publish_gw_uc_ok=0
+if [[ -n "${PROFILE}" ]]; then
+  if ( "${SCRIPT_DIR}/update_arango_gateway_registry_uc.sh" \
+    "${APP_URL}" "${APP_NAME}" "${ARANGO_GATEWAY_REGISTRY_TABLE}" "${WAREHOUSE_ID}" "${PROFILE}" \
+    "${APP_SERVICE_PRINCIPAL_CLIENT_ID}" ); then
+    _publish_gw_uc_ok=1
+  fi
+else
+  if ( "${SCRIPT_DIR}/update_arango_gateway_registry_uc.sh" \
+    "${APP_URL}" "${APP_NAME}" "${ARANGO_GATEWAY_REGISTRY_TABLE}" "${WAREHOUSE_ID}" "" \
+    "${APP_SERVICE_PRINCIPAL_CLIENT_ID}" ); then
+    _publish_gw_uc_ok=1
+  fi
+fi
+if [[ "${_publish_gw_uc_ok}" -ne 1 ]]; then
+  echo "NOTE: Gateway URL UC publish failed (often table owned by app SP without broad grants yet). Restart arango-gateway-app once, then re-run ./deploy_app.sh or run update_arango_gateway_registry_uc.sh manually." >&2
+fi
+
 if [[ -f "${TUNNEL_PID_FILE}" ]]; then
   OLD_PID="$(cat "${TUNNEL_PID_FILE}" 2>/dev/null || true)"
   if [[ -n "${OLD_PID}" ]] && kill -0 "${OLD_PID}" 2>/dev/null; then
@@ -319,7 +340,8 @@ echo "CLOUDFLARED_PID=${TUNNEL_PID}"
 echo
 echo "To export in your current shell:"
 echo "export DATABRICKS_APP_URL=\"${APP_URL}\""
-echo "export ARANGO_GATEWAY_BASE_URL=\"${APP_URL}\"   # use this for arango-dashboard-app ARANGO_GATEWAY_BASE_URL"
+echo "# arango-dashboard-app reads gateway URL from UC (${ARANGO_GATEWAY_REGISTRY_TABLE}); override with:"
+echo "# export ARANGO_GATEWAY_BASE_URL=\"${APP_URL}\""
 if [[ -n "${APP_URL_NUMERIC_SUFFIX}" ]]; then
   echo "export DATABRICKS_APP_URL_NUMERIC_SUFFIX=\"${APP_URL_NUMERIC_SUFFIX}\""
 fi

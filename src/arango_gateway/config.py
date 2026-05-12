@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 # Defaults align with ``app.yaml`` so local ``python app.py`` matches a typical first deploy.
 _DEFAULT_DATABRICKS_SQL_WAREHOUSE_ID = "473d40703241ee4c"
 _DEFAULT_ARANGO_REGISTRY_TABLE = "workspace.default.arango_connection_registry"
+_DEFAULT_ARANGO_GATEWAY_REGISTRY_TABLE = "workspace.default.arango_gateway_registry"
 _DEFAULT_ARANGO_PING_BASIC_AUTH_PASSWORD = (
     "8c1bc9344c886819859534a5ac951412c650870662228617cfbb69023489afd2"
 )
@@ -60,6 +61,18 @@ class AppConfig:
     ARANGO_REGISTRY_AUTO_CREATE: bool = field(
         default_factory=lambda: os.environ.get(
             "ARANGO_REGISTRY_AUTO_CREATE", "true"
+        ).lower()
+        == "true"
+    )
+    ARANGO_GATEWAY_REGISTRY_TABLE: str = field(
+        default_factory=lambda: (
+            (os.environ.get("ARANGO_GATEWAY_REGISTRY_TABLE", "") or "").strip()
+            or _DEFAULT_ARANGO_GATEWAY_REGISTRY_TABLE
+        )
+    )
+    ARANGO_GATEWAY_REGISTRY_AUTO_CREATE: bool = field(
+        default_factory=lambda: os.environ.get(
+            "ARANGO_GATEWAY_REGISTRY_AUTO_CREATE", "true"
         ).lower()
         == "true"
     )

@@ -24,7 +24,9 @@ python app.py
 
 The first run creates the Databricks App if that name does not exist yet (`databricks apps create`), then deploys.
 
-Uses `./update_arango_registry_uc.sh` in this repo (same behavior as `flask-arango-agent`). For **`DEBUG_POST_DEPLOY_IMPORT=true`**, this repo includes **`debug_post_deploy_import.sh`** (expects **`arango-import/nodes.jsonl`** and **`edges.jsonl`** next to it). That step uses **`LOCAL_ARANGO_URL`** and the same **`ARANGO_PING_BASIC_AUTH_*`** defaults as **`app.yaml`** / **`deploy_app.sh`** (override with **`export ARANGO_PING_BASIC_AUTH_PASSWORD=…`** or **`ARANGO_ROOT_PASSWORD_FILE`** for a different cluster).
+Uses `./update_arango_registry_uc.sh` and **`./update_arango_gateway_registry_uc.sh`** (publishes the app’s public HTTPS URL to **`ARANGO_GATEWAY_REGISTRY_TABLE`** for `arango-dashboard-app` and other consumers). If deploy reports **INSUFFICIENT_PERMISSIONS** on that table, the table was likely created first by the **gateway app SP**; **restart the gateway app** so it runs `GRANT … TO \`account users\``, then re-run **`./deploy_app.sh`**, or ask a metastore admin to **`DROP TABLE`** on that registry and redeploy.
+
+For **`DEBUG_POST_DEPLOY_IMPORT=true`**, this repo includes **`debug_post_deploy_import.sh`** (expects **`arango-import/nodes.jsonl`** and **`edges.jsonl`** next to it). That step uses **`LOCAL_ARANGO_URL`** and the same **`ARANGO_PING_BASIC_AUTH_*`** defaults as **`app.yaml`** / **`deploy_app.sh`** (override with **`export ARANGO_PING_BASIC_AUTH_PASSWORD=…`** or **`ARANGO_ROOT_PASSWORD_FILE`** for a different cluster).
 
 ## Deploy via bundle
 

@@ -23,6 +23,12 @@ env:
   - name: ARANGO_REGISTRY_AUTO_CREATE
     description: "If true, app creates schema/table on first registry call"
     value: "true"
+  - name: ARANGO_GATEWAY_REGISTRY_TABLE
+    description: "UC Delta table (catalog.schema.table) where this gateway publishes its public base URL for other apps (e.g. arango-dashboard-app)"
+    value: "workspace.default.arango_gateway_registry"
+  - name: ARANGO_GATEWAY_REGISTRY_AUTO_CREATE
+    description: "If true, app creates ARANGO_GATEWAY_REGISTRY_TABLE on startup and upserts the active gateway URL (from Apps API + DATABRICKS_APP_NAME)"
+    value: "true"
   - name: ARANGO_PING_TIMEOUT_SECONDS
     description: "Timeout in seconds for outbound Arango connectivity probe"
     value: "5"

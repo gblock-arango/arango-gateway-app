@@ -8,12 +8,14 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from arango_gateway.config import AppConfig
 from arango_gateway.routes.api import api_blueprint
 from arango_gateway.routes.embed import arango_embed_bp
+from arango_gateway.services.gateway_url_registry import publish_self_gateway_url_to_uc_if_configured
 from arango_gateway.services.startup_debug import run_startup_debug_check
 
 
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config.from_object(AppConfig())
+    publish_self_gateway_url_to_uc_if_configured(app)
 
     @app.route("/health")
     def health_root():
