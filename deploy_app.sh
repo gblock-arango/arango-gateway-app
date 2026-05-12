@@ -12,6 +12,9 @@ set -euo pipefail
 # On first run, if the Databricks App name does not exist yet, the script runs
 # ``databricks apps create`` before ``databricks apps deploy``.
 #
+# If ``apps create`` was interrupted (Ctrl+C) or the app was stopped, ``apps deploy`` can fail with
+# "not in RUNNING state". The script then runs ``databricks apps start`` and waits.
+#
 # Genie lives on arango-dashboard-app; this script does not create Genie registry tables.
 #
 # Optional debug import: DEBUG_POST_DEPLOY_IMPORT=true ./deploy_app.sh ...
@@ -69,6 +72,32 @@ if [[ -n "${PROFILE}" ]]; then
 else
   PROFILE_ARGS=()
 fi
+
+# ``databricks apps deploy`` requires app_status RUNNING. Handles stopped apps and Ctrl+C
+# during ``apps create`` (partial provisioning).
+ensure_app_running_before_deploy() {
+  local json app_state compute_state
+  if ! json="$(databricks apps get "${APP_NAME}" --output json "${PROFILE_ARGS[@]}" 2>/dev/null)"; then
+    return 0
+  fi
+  app_state="$(
+    "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("app_status") or {}).get("state",""))' <<< "${json}" 2>/dev/null || true
+  )"
+  compute_state="$(
+    "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("compute_status") or {}).get("state",""))' <<< "${json}" 2>/dev/null || true
+  )"
+  if [[ "${app_state}" == "RUNNING" ]]; then
+    echo "App '${APP_NAME}' is RUNNING; proceeding to deploy."
+    return 0
+  fi
+  echo "App '${APP_NAME}' is not RUNNING (app_status=${app_state:-unknown}, compute_status=${compute_state:-unknown})."
+  echo "Deploy requires RUNNING; starting app (waits until compute is active)..."
+  if [[ "${SKIP_APPS_START_BEFORE_DEPLOY:-}" == "1" ]]; then
+    echo "SKIP_APPS_START_BEFORE_DEPLOY=1: skipping databricks apps start; deploy may fail." >&2
+    return 0
+  fi
+  databricks apps start "${APP_NAME}" "${PROFILE_ARGS[@]}"
+}
 
 mkdir -p "${STATE_DIR}"
 
@@ -145,6 +174,8 @@ if ! databricks apps get "${APP_NAME}" "${PROFILE_ARGS[@]}" &>/dev/null; then
     --description "Arango gateway — UC registry, Arango embed proxy, graph APIs" \
     "${PROFILE_ARGS[@]}"
 fi
+
+ensure_app_running_before_deploy
 
 echo "Deploying app '${APP_NAME}' from '${SOURCE_CODE_PATH}'..."
 databricks apps deploy "${APP_NAME}" \

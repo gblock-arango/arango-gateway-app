@@ -27,6 +27,33 @@ HOP_BY_HOP = frozenset(
 REDIRECT_STATI = frozenset({301, 302, 303, 307, 308})
 EMBED_PREFIX = "/embedded-arango"
 
+# Aardvark logs in via POST JSON to ``/_open/auth``. Sending server-side HTTP Basic on that
+# request (from ``requests`` ``auth=``) can make Arango treat the connection as already
+# authenticated with the proxy credentials and reject the UI password, or otherwise
+# conflict with JWT issuance. ``/_open/auth/renew`` must use the browser's Bearer token.
+_OPEN_AUTH_LOGIN = re.compile(r"/_open/auth(?:/|$|\?)")
+_OPEN_AUTH_RENEW = re.compile(r"/_open/auth/renew(?:/|$|\?)")
+
+
+def _embed_use_server_basic_auth(subpath: str, method: str) -> bool:
+    """When False, do not add ``Authorization: Basic`` from the gateway config (body/Bearer only)."""
+    norm = "/" + subpath.strip().replace("\\", "/").strip("/").lower()
+    if _OPEN_AUTH_RENEW.search(norm):
+        return False
+    if method.upper() == "POST" and _OPEN_AUTH_LOGIN.search(norm):
+        return False
+    return True
+
+
+def _rewrite_set_cookie_for_embed(cookie_header: str, *, relax_samesite: bool) -> str:
+    """Strip Domain; for cross-site iframes force SameSite=None (requires Secure)."""
+    v = re.sub(r";\s*Domain=[^;]+", "", cookie_header, flags=re.I)
+    if not relax_samesite:
+        return v
+    v = re.sub(r";\s*SameSite=[^;]*", "", v, flags=re.I)
+    v = re.sub(r";\s*Secure\b", "", v, flags=re.I)
+    return f"{v}; SameSite=None; Secure"
+
 arango_embed_bp = Blueprint(
     "arango_embed",
     __name__,
@@ -209,15 +236,24 @@ def _proxy_upstream(subpath: str) -> Response:
     if request.query_string:
         upstream = f"{upstream}?{request.query_string.decode()}"
 
+    use_basic = _embed_use_server_basic_auth(path, request.method)
+    relax_cookie = bool(
+        current_app.config.get("ARANGO_EMBED_COOKIE_SAMESITE_NONE", True)
+    )
+
     out_headers: dict[str, str] = {}
     for k, v in request.headers.items():
         kl = k.lower()
         if kl in HOP_BY_HOP or kl == "host":
             continue
+        if kl == "authorization" and use_basic:
+            continue
         out_headers[k] = v
 
     parts = urlsplit(origin)
     out_headers["Host"] = parts.netloc.split("@")[-1]
+
+    req_auth: tuple[str, str] | None = (user, password) if use_basic else None
 
     try:
         r = requests.request(
@@ -225,7 +261,7 @@ def _proxy_upstream(subpath: str) -> Response:
             url=upstream,
             headers=out_headers,
             data=request.get_data(),
-            auth=(user, password),
+            auth=req_auth,
             verify=verify_tls,
             timeout=(15, 180),
             allow_redirects=False,
@@ -250,8 +286,10 @@ def _proxy_upstream(subpath: str) -> Response:
             out.headers["Location"] = _rewrite_location(v, origin)
             continue
         if kl == "set-cookie":
-            v2 = re.sub(r";\s*Domain=[^;]+", "", v, flags=re.I)
-            out.headers.add("Set-Cookie", v2)
+            out.headers.add(
+                "Set-Cookie",
+                _rewrite_set_cookie_for_embed(v, relax_samesite=relax_cookie),
+            )
             continue
         out.headers[k] = v
 

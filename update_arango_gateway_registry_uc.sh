@@ -9,8 +9,10 @@ set -euo pipefail
 # Usage:
 #   ./update_arango_gateway_registry_uc.sh [base-url] [app-name] [table] [warehouse-id] [profile] [gateway-sp-client-id]
 #
+# Optional env: GATEWAY_REGISTRY_UC_UPSERT_RETRIES (default 10) — retries when Delta reports
+# concurrent writes (e.g. deploy script vs gateway app startup publishing the same table).
+#
 # Example (from deploy_app.sh after apps get):
-#   ./update_arango_gateway_registry_uc.sh \
 #     "https://arango-gateway-app-123.aws.databricksapps.com" \
 #     arango-gateway-app \
 #     workspace.default.arango_gateway_registry \
@@ -66,7 +68,7 @@ run_sql() {
   if [[ -z "${statement_id}" ]]; then
     echo "ERROR: SQL statement did not return statement_id" >&2
     echo "${response}" >&2
-    exit 1
+    return 1
   fi
 
   for _ in $(seq 1 30); do
@@ -76,7 +78,7 @@ run_sql() {
     if [[ "${status}" == "FAILED" || "${status}" == "CANCELED" || "${status}" == "CLOSED" ]]; then
       echo "ERROR: SQL statement ${statement_id} status=${status}" >&2
       databricks api get "/api/2.0/sql/statements/${statement_id}" "${PROFILE_ARGS[@]}" >&2 || true
-      exit 1
+      return 1
     fi
     sleep 1
     response="$(databricks api get "/api/2.0/sql/statements/${statement_id}" "${PROFILE_ARGS[@]}")"
@@ -84,7 +86,7 @@ run_sql() {
   done
 
   echo "ERROR: SQL statement ${statement_id} did not finish in time." >&2
-  exit 1
+  return 1
 }
 
 ESC_URL="$(safe_sql_literal "${BASE_URL}")"
@@ -92,8 +94,8 @@ ESC_APP="$(safe_sql_literal "${APP_NAME_INPUT}")"
 FQTBL="\`${CATALOG_NAME}\`.\`${SCHEMA_NAME}\`.\`${TABLE_NAME}\`"
 
 echo "Ensuring gateway URL registry schema/table exists..."
-run_sql "CREATE SCHEMA IF NOT EXISTS \`${CATALOG_NAME}\`.\`${SCHEMA_NAME}\`"
-run_sql "CREATE TABLE IF NOT EXISTS ${FQTBL} (base_url STRING NOT NULL, app_name STRING NOT NULL, is_active BOOLEAN NOT NULL, updated_at TIMESTAMP NOT NULL) USING DELTA"
+run_sql "CREATE SCHEMA IF NOT EXISTS \`${CATALOG_NAME}\`.\`${SCHEMA_NAME}\`" || exit 1
+run_sql "CREATE TABLE IF NOT EXISTS ${FQTBL} (base_url STRING NOT NULL, app_name STRING NOT NULL, is_active BOOLEAN NOT NULL, updated_at TIMESTAMP NOT NULL) USING DELTA" || exit 1
 
 echo "Granting SELECT, MODIFY on ${REGISTRY_TABLE} to \`account users\` (so laptop deploy can upsert even if the app SP created the table first)..."
 if ! ( run_sql "GRANT SELECT, MODIFY ON TABLE ${FQTBL} TO \`account users\`" ); then
@@ -101,8 +103,21 @@ if ! ( run_sql "GRANT SELECT, MODIFY ON TABLE ${FQTBL} TO \`account users\`" ); 
 fi
 
 echo "Upserting active gateway base URL into ${REGISTRY_TABLE}..."
-run_sql "UPDATE ${FQTBL} SET is_active = FALSE WHERE is_active = TRUE"
-run_sql "INSERT INTO ${FQTBL} (base_url, app_name, is_active, updated_at) VALUES ('${ESC_URL}', '${ESC_APP}', TRUE, current_timestamp())"
+# Same pattern as the gateway app on startup (UPDATE inactive + INSERT). Two writers
+# often race right after deploy → DELTA_CONCURRENT_APPEND / ROW_LEVEL_CHANGES; retry.
+UPSERT_ATTEMPTS="${GATEWAY_REGISTRY_UC_UPSERT_RETRIES:-10}"
+for attempt in $(seq 1 "${UPSERT_ATTEMPTS}"); do
+  if run_sql "UPDATE ${FQTBL} SET is_active = FALSE WHERE is_active = TRUE" &&
+    run_sql "INSERT INTO ${FQTBL} (base_url, app_name, is_active, updated_at) VALUES ('${ESC_URL}', '${ESC_APP}', TRUE, current_timestamp())"; then
+    break
+  fi
+  if [[ "${attempt}" -ge "${UPSERT_ATTEMPTS}" ]]; then
+    echo "ERROR: gateway registry upsert failed after ${UPSERT_ATTEMPTS} attempts (concurrent writers or permissions)." >&2
+    exit 1
+  fi
+  echo "NOTE: UC upsert conflict (often concurrent gateway app publish); retrying (${attempt}/${UPSERT_ATTEMPTS})..." >&2
+  sleep $((1 + attempt))
+done
 
 if [[ -n "${GATEWAY_SP_ID}" ]]; then
   echo "Granting SELECT, MODIFY on ${REGISTRY_TABLE} to gateway app SP ${GATEWAY_SP_ID}..."

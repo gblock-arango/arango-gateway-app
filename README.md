@@ -4,6 +4,8 @@ Databricks App: **Arango HTTP facade** — Unity Catalog registry, Arango Web UI
 
 **Configuration:** `app.yaml` sets default env values (e.g. `ARANGO_REGISTRY_TABLE`, `DATABRICKS_SQL_WAREHOUSE_ID`, `UC_GRAPH_VOLUME_NAME`) so a plain `databricks apps deploy` / `./deploy_app.sh` run works without bundle variable substitution. `src/arango_gateway/config.py` uses the same fallbacks when variables are unset locally.
 
+**Aardvark in an iframe:** The embed proxy skips server-side HTTP Basic on `POST …/_open/auth` (Aardvark’s JWT login) so the UI password is not overridden by the gateway’s `ARANGO_PING_BASIC_AUTH_*` credentials. It rewrites `Set-Cookie` with `SameSite=None; Secure` by default (`ARANGO_EMBED_COOKIE_SAMESITE_NONE`) for cross-site iframes. If the UI still misbehaves behind a tunnel, set Arango’s **`--http.trusted-origin`** (or `all`) for the browser-visible gateway/dashboard origins per [Arango reverse-proxy notes](https://github.com/arangodb/arangodb/issues/8713).
+
 ## Run locally
 
 ```bash

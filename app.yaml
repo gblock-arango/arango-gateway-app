@@ -1,7 +1,7 @@
 command:
   - "bash"
   - "-lc"
-  - "export PYTHONPATH=src && gunicorn app:app --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} --workers 2 --timeout 660"
+  - "export PYTHONPATH=src && gunicorn wsgi:app --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} --workers 2 --timeout 660"
 
 # Default values match typical dev setup; override per workspace in the Databricks App UI or by
 # editing this file before deploy. ``databricks bundle deploy`` can still layer targets in
@@ -56,6 +56,9 @@ env:
   - name: ARANGO_UI_IFRAME_URL
     description: "Optional override for Arango HTTP origin for embed proxy"
     value: ""
+  - name: ARANGO_EMBED_COOKIE_SAMESITE_NONE
+    description: "When true, Set-Cookie from Arango is rewritten with SameSite=None; Secure so JWT session cookies can stick in cross-site iframes (Databricks)"
+    value: "true"
   - name: ARANGO_CONVERSATION_URL
     description: "Optional URL for POST /api/arango/chat to forward to; empty => stub"
     value: ""

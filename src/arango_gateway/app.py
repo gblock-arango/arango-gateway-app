@@ -23,7 +23,9 @@ def create_app() -> Flask:
 
     @app.after_request
     def add_security_headers(response):
-        response.headers["X-Frame-Options"] = "ALLOWALL"
+        # ``X-Frame-Options: ALLOWALL`` is not a valid directive; rely on CSP for embedders.
+        response.headers.pop("X-Frame-Options", None)
+        response.headers["Content-Security-Policy"] = "frame-ancestors *"
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"

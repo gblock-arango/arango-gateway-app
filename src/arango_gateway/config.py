@@ -102,6 +102,12 @@ class AppConfig:
     ARANGO_UI_IFRAME_URL: str = field(
         default_factory=lambda: (os.environ.get("ARANGO_UI_IFRAME_URL", "") or "").strip()
     )
+    ARANGO_EMBED_COOKIE_SAMESITE_NONE: bool = field(
+        default_factory=lambda: os.environ.get(
+            "ARANGO_EMBED_COOKIE_SAMESITE_NONE", "true"
+        ).lower()
+        == "true"
+    )
     UC_GRAPH_VOLUME_NAME: str = field(
         default_factory=_uc_graph_volume_name_from_env
     )
