@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+import time
 
 from databricks.sdk import WorkspaceClient
 
@@ -12,6 +12,25 @@ from arango_gateway.services.arango_registry import parse_registry_table_name
 from arango_gateway.services.databricks_sql import execute_sql
 
 logger = logging.getLogger(__name__)
+
+# Substrings (lowercased) of Delta concurrent-write errors that justify retrying MERGE.
+_DELTA_CONCURRENT_MARKERS = (
+    "concurrent",
+    "concurrentappend",
+    "concurrentmodification",
+    "concurrent_append",
+    "concurrent_modification",
+    "concurrent_delete_read",
+    "concurrent_delete_delete",
+    "concurrent_transaction",
+    "concurrent_write",
+)
+
+
+def _looks_like_delta_concurrent_conflict(exc: Exception) -> bool:
+    """Heuristic match for Delta optimistic-concurrency conflicts surfaced by the SQL API."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _DELTA_CONCURRENT_MARKERS)
 
 
 def ensure_gateway_registry_table(table_name: str, warehouse_id: str) -> None:
@@ -66,9 +85,20 @@ def publish_gateway_base_url(
     warehouse_id: str,
     base_url: str,
     app_name: str,
+    max_merge_retries: int = 8,
 ) -> None:
     """
-    Mark prior rows inactive and insert a new active row (same pattern as Arango tunnel registry).
+    Idempotently mark this app's base URL as the single active row.
+
+    Uses a single ``MERGE INTO`` so that concurrent writers (e.g. multiple gunicorn
+    workers calling ``publish_self_gateway_url_to_uc_if_configured`` on startup) cannot
+    leave duplicate active rows. The merge:
+      - inserts the row when no row with this ``base_url`` exists,
+      - updates ``is_active=TRUE`` + ``updated_at`` when a row with this URL exists,
+      - sets every other ``is_active=TRUE`` row to ``FALSE`` (``WHEN NOT MATCHED BY SOURCE``).
+
+    Delta's optimistic concurrency raises a conflict if two writers race; we retry
+    with backoff until the table converges.
     """
     ref = parse_registry_table_name(table_name)
     url = (base_url or "").strip().rstrip("/")
@@ -77,23 +107,52 @@ def publish_gateway_base_url(
         return
 
     try_grant_account_users_gateway_registry_dml(ref, warehouse_id)
-    execute_sql(
-        statement=f"UPDATE {ref.fqn} SET is_active = FALSE WHERE is_active = TRUE",
-        warehouse_id=warehouse_id,
-    )
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     safe_url = url.replace("'", "''")
     safe_name = name.replace("'", "''")
-    execute_sql(
-        statement=f"""
-            INSERT INTO {ref.fqn}
-                (base_url, app_name, is_active, updated_at)
-            VALUES
-                ('{safe_url}', '{safe_name}', TRUE, TIMESTAMP('{ts}'))
-        """,
-        warehouse_id=warehouse_id,
-    )
-    try_grant_account_users_gateway_registry_dml(ref, warehouse_id)
+
+    merge_sql = f"""
+        MERGE INTO {ref.fqn} t
+        USING (
+            SELECT
+                '{safe_url}' AS base_url,
+                '{safe_name}' AS app_name,
+                current_timestamp() AS updated_at
+        ) s
+        ON t.base_url = s.base_url
+        WHEN MATCHED THEN UPDATE SET
+            app_name = s.app_name,
+            is_active = TRUE,
+            updated_at = s.updated_at
+        WHEN NOT MATCHED THEN INSERT
+            (base_url, app_name, is_active, updated_at)
+            VALUES (s.base_url, s.app_name, TRUE, s.updated_at)
+        WHEN NOT MATCHED BY SOURCE AND t.is_active = TRUE THEN UPDATE SET
+            is_active = FALSE,
+            updated_at = current_timestamp()
+    """
+
+    last_exc: Exception | None = None
+    for attempt in range(1, max(1, max_merge_retries) + 1):
+        try:
+            execute_sql(statement=merge_sql, warehouse_id=warehouse_id)
+            try_grant_account_users_gateway_registry_dml(ref, warehouse_id)
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_merge_retries or not _looks_like_delta_concurrent_conflict(exc):
+                raise
+            backoff = 0.25 * attempt
+            logger.warning(
+                "Concurrent MERGE conflict on %s (attempt %d/%d); retrying in %.2fs: %s",
+                ref.fqn,
+                attempt,
+                max_merge_retries,
+                backoff,
+                exc,
+            )
+            time.sleep(backoff)
+    if last_exc is not None:
+        raise last_exc
 
 
 def resolve_self_app_base_url() -> str | None:

@@ -108,19 +108,23 @@ if ! ( run_sql "GRANT SELECT, MODIFY ON TABLE ${FQTBL} TO \`account users\`" ); 
 fi
 
 echo "Upserting active gateway base URL into ${REGISTRY_TABLE}..."
-# Same pattern as the gateway app on startup (UPDATE inactive + INSERT). Two writers
-# often race right after deploy → DELTA_CONCURRENT_APPEND / ROW_LEVEL_CHANGES; retry.
+# Same idempotent MERGE pattern as the gateway app on startup. A single MERGE
+# atomically (a) inserts the row when missing, (b) updates and re-activates the row
+# when present, and (c) deactivates every other ``is_active=TRUE`` row via ``WHEN
+# NOT MATCHED BY SOURCE``. This converges to exactly one active row even when racing
+# concurrent gunicorn workers running the same MERGE — Delta's optimistic concurrency
+# will conflict and we retry below.
+MERGE_SQL="MERGE INTO ${FQTBL} t USING (SELECT '${ESC_URL}' AS base_url, '${ESC_APP}' AS app_name, current_timestamp() AS updated_at) s ON t.base_url = s.base_url WHEN MATCHED THEN UPDATE SET app_name = s.app_name, is_active = TRUE, updated_at = s.updated_at WHEN NOT MATCHED THEN INSERT (base_url, app_name, is_active, updated_at) VALUES (s.base_url, s.app_name, TRUE, s.updated_at) WHEN NOT MATCHED BY SOURCE AND t.is_active = TRUE THEN UPDATE SET is_active = FALSE, updated_at = current_timestamp()"
 UPSERT_ATTEMPTS="${GATEWAY_REGISTRY_UC_UPSERT_RETRIES:-10}"
 for attempt in $(seq 1 "${UPSERT_ATTEMPTS}"); do
-  if run_sql "UPDATE ${FQTBL} SET is_active = FALSE WHERE is_active = TRUE" &&
-    run_sql "INSERT INTO ${FQTBL} (base_url, app_name, is_active, updated_at) VALUES ('${ESC_URL}', '${ESC_APP}', TRUE, current_timestamp())"; then
+  if run_sql "${MERGE_SQL}"; then
     break
   fi
   if [[ "${attempt}" -ge "${UPSERT_ATTEMPTS}" ]]; then
-    echo "ERROR: gateway registry upsert failed after ${UPSERT_ATTEMPTS} attempts (concurrent writers or permissions)." >&2
+    echo "ERROR: gateway registry MERGE failed after ${UPSERT_ATTEMPTS} attempts (concurrent writers or permissions)." >&2
     exit 1
   fi
-  echo "NOTE: UC upsert conflict (often concurrent gateway app publish); retrying (${attempt}/${UPSERT_ATTEMPTS})..." >&2
+  echo "NOTE: UC MERGE conflict (often concurrent gateway app publish); retrying (${attempt}/${UPSERT_ATTEMPTS})..." >&2
   sleep $((1 + attempt))
 done
 

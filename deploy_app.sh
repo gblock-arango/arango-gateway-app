@@ -192,7 +192,7 @@ databricks sync . "${SOURCE_CODE_PATH}" "${PROFILE_ARGS[@]}"
 if ! databricks apps get "${APP_NAME}" "${PROFILE_ARGS[@]}" &>/dev/null; then
   echo "Creating Databricks App '${APP_NAME}' (not found in workspace; first-time setup)..."
   databricks apps create "${APP_NAME}" \
-    --description "Arango gateway — UC registry, Arango embed proxy, graph APIs" \
+    --description "Arango gateway — UC registry, Arango embed proxy, access to remote Arango Cluster" \
     "${PROFILE_ARGS[@]}"
 fi
 
@@ -296,11 +296,39 @@ else
   }
 fi
 
+REGISTRY_CATALOG_PRE="$(echo "${REGISTRY_TABLE}" | cut -d. -f1)"
+REGISTRY_SCHEMA_PRE="$(echo "${REGISTRY_TABLE}" | cut -d. -f2)"
+GATEWAY_REGISTRY_CATALOG_PRE="$(echo "${ARANGO_GATEWAY_REGISTRY_TABLE}" | cut -d. -f1)"
+GATEWAY_REGISTRY_SCHEMA_PRE="$(echo "${ARANGO_GATEWAY_REGISTRY_TABLE}" | cut -d. -f2)"
+
+# Pre-create both UC registry tables BEFORE granting on them. On a fresh install the
+# app SP has not yet run startup_debug (app_status often UNAVAILABLE when this runs),
+# so the connection registry does not exist yet and the GRANT below would otherwise
+# fail with TABLE_DOES_NOT_EXIST. Creating here also makes the human (the SQL warehouse
+# caller) the owner, so the subsequent GRANTs to the app SP succeed.
+echo "Pre-creating UC registry schemas/tables so GRANTs succeed and human owns them..."
+run_sql_statement "CREATE SCHEMA IF NOT EXISTS \`${REGISTRY_CATALOG_PRE}\`.\`${REGISTRY_SCHEMA_PRE}\`"
+run_sql_statement "CREATE TABLE IF NOT EXISTS ${REGISTRY_TABLE} (cluster_name STRING NOT NULL, ip_address STRING NOT NULL, port INT NOT NULL, protocol STRING NOT NULL, is_active BOOLEAN NOT NULL, updated_at TIMESTAMP NOT NULL) USING DELTA"
+if [[ "${GATEWAY_REGISTRY_CATALOG_PRE}.${GATEWAY_REGISTRY_SCHEMA_PRE}" != "${REGISTRY_CATALOG_PRE}.${REGISTRY_SCHEMA_PRE}" ]]; then
+  run_sql_statement "CREATE SCHEMA IF NOT EXISTS \`${GATEWAY_REGISTRY_CATALOG_PRE}\`.\`${GATEWAY_REGISTRY_SCHEMA_PRE}\`"
+fi
+run_sql_statement "CREATE TABLE IF NOT EXISTS ${ARANGO_GATEWAY_REGISTRY_TABLE} (base_url STRING NOT NULL, app_name STRING NOT NULL, is_active BOOLEAN NOT NULL, updated_at TIMESTAMP NOT NULL) USING DELTA"
+
+# Tolerant grant: ``account users`` may be disabled on some workspaces. Run in a
+# subshell so ``run_sql_statement``'s ``exit 1`` does not kill the deploy script.
+echo "Granting SELECT, MODIFY on registry tables to 'account users' (so humans can read/inspect)..."
+( run_sql_statement "GRANT SELECT, MODIFY ON TABLE ${REGISTRY_TABLE} TO \`account users\`" ) || \
+  echo "NOTE: GRANT account users on ${REGISTRY_TABLE} failed (probably ok; continuing)." >&2
+( run_sql_statement "GRANT SELECT, MODIFY ON TABLE ${ARANGO_GATEWAY_REGISTRY_TABLE} TO \`account users\`" ) || \
+  echo "NOTE: GRANT account users on ${ARANGO_GATEWAY_REGISTRY_TABLE} failed (probably ok; continuing)." >&2
+
 echo "Granting UC privileges to app service principal client id '${APP_SERVICE_PRINCIPAL_CLIENT_ID}'..."
 run_sql_statement "GRANT USE CATALOG ON CATALOG workspace TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
 run_sql_statement "GRANT USE SCHEMA ON SCHEMA workspace.default TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
 run_sql_statement "GRANT SELECT ON TABLE ${REGISTRY_TABLE} TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
 run_sql_statement "GRANT MODIFY ON TABLE ${REGISTRY_TABLE} TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
+run_sql_statement "GRANT SELECT ON TABLE ${ARANGO_GATEWAY_REGISTRY_TABLE} TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
+run_sql_statement "GRANT MODIFY ON TABLE ${ARANGO_GATEWAY_REGISTRY_TABLE} TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
 
 REGISTRY_CATALOG="$(echo "${REGISTRY_TABLE}" | cut -d. -f1)"
 REGISTRY_SCHEMA="$(echo "${REGISTRY_TABLE}" | cut -d. -f2)"

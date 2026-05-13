@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from .databricks_sql import execute_sql
+
+logger = logging.getLogger(__name__)
 
 # Web UI entry (Aardvark). Iframe must target this path, not the server root.
 ARANGO_AARDVARK_PATH = "/_db/_system/_admin/aardvark/index.html"
@@ -38,6 +41,31 @@ def parse_registry_table_name(table_name: str) -> RegistryTableRef:
     return RegistryTableRef(catalog=parts[0], schema=parts[1], table=parts[2])
 
 
+def try_grant_account_users_registry_dml(ref: RegistryTableRef, warehouse_id: str) -> None:
+    """
+    Allow non-owner identities (e.g. the human running ``deploy_app.sh``, or anyone
+    inspecting the registry from the Databricks UI) to SELECT/UPDATE the registry.
+
+    The gateway app commonly creates this table first (DEBUG_STARTUP_CHECKS), making the
+    app service principal the owner; without a follow-on grant, humans get
+    ``Requires permission SELECT on table ...`` in the workspace UI.
+
+    Uses the account-level ``account users`` principal. Tighten in production if your
+    security model disallows it.
+    """
+    try:
+        execute_sql(
+            statement=f"GRANT SELECT, MODIFY ON TABLE {ref.fqn} TO `account users`",
+            warehouse_id=warehouse_id,
+        )
+    except Exception as exc:
+        logger.info(
+            "Could not GRANT %s to `account users` (may be disabled or not owner): %s",
+            ref.fqn,
+            exc,
+        )
+
+
 def ensure_registry_table(table_name: str, warehouse_id: str) -> None:
     """Create schema/table for registry if they do not exist."""
     ref = parse_registry_table_name(table_name)
@@ -61,6 +89,7 @@ def ensure_registry_table(table_name: str, warehouse_id: str) -> None:
         """,
         warehouse_id=warehouse_id,
     )
+    try_grant_account_users_registry_dml(ref, warehouse_id)
 
 
 def get_active_registry_entry(table_name: str, warehouse_id: str) -> dict:
