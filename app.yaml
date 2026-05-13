@@ -3,13 +3,13 @@ command:
   - "-lc"
   - "export PYTHONPATH=src && gunicorn wsgi:app --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} --workers 2 --timeout 660"
 
-# Default values match typical dev setup; override per workspace in the Databricks App UI or by
-# editing this file before deploy. ``databricks bundle deploy`` can still layer targets in
-# ``databricks.yml`` for alternate catalogs/warehouses when you wire substitution there later.
+# ``DATABRICKS_SQL_WAREHOUSE_ID``: set here for solo deploy, or rely on **arango-platform-bundle**
+# ``sql_warehouse_id`` (``resources/apps.yml`` injects ``${var.sql_warehouse_id}`` and overrides
+# this entry on bundle deploy). ``config.py`` does not supply a default — env only.
 
 env:
   - name: DATABRICKS_SQL_WAREHOUSE_ID
-    description: "SQL Warehouse ID for Unity Catalog SQL (registry, graph metadata)."
+    description: "SQL Warehouse ID for Unity Catalog SQL (registry, graph metadata); required for UC operations"
     value: "473d40703241ee4c"
   - name: ARANGO_REGISTRY_TABLE
     description: "Unity Catalog table storing Arango connection coordinates (catalog.schema.table); with UC_GRAPH_VOLUME_NAME drives default UC_GRAPH_SNAPSHOT_BASE when UC_GRAPH_SNAPSHOT_BASE is unset"

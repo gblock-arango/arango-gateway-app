@@ -9,8 +9,8 @@ variables:
   # (requires bundle substitution wired into your pipeline). Direct ``deploy_agent.sh`` uses
   # ``app.yaml`` defaults as deployed.
   sql_warehouse_id:
-    description: "Databricks SQL warehouse id (hex)"
-    default: "473d40703241ee4c"
+    description: "Databricks SQL warehouse id (hex); set via --var or targets (no default)"
+    default: ""
   arango_registry_table:
     default: "workspace.default.arango_connection_registry"
   uc_graph_volume_name:

@@ -16,19 +16,24 @@ set -euo pipefail
 #     "https://arango-gateway-app-123.aws.databricksapps.com" \
 #     arango-gateway-app \
 #     workspace.default.arango_gateway_registry \
-#     473d40703241ee4c \
+#     <your-sql-warehouse-id> \
 #     "" \
 #     "8d019ad9-0038-453c-927a-bc5297cea12d"
 
 BASE_URL_INPUT="${1:-${DATABRICKS_APP_URL:-}}"
 APP_NAME_INPUT="${2:-${DATABRICKS_APP_NAME:-arango-gateway-app}}"
 REGISTRY_TABLE="${3:-${ARANGO_GATEWAY_REGISTRY_TABLE:-workspace.default.arango_gateway_registry}}"
-WAREHOUSE_ID="${4:-${DATABRICKS_SQL_WAREHOUSE_ID:-473d40703241ee4c}}"
+WAREHOUSE_ID="${4:-${DATABRICKS_SQL_WAREHOUSE_ID:-}}"
 PROFILE="${5:-}"
 GATEWAY_SP_ID="${6:-${APP_SERVICE_PRINCIPAL_CLIENT_ID:-}}"
 
 if [[ -z "${BASE_URL_INPUT}" ]]; then
   echo "ERROR: gateway base URL required (arg1 or DATABRICKS_APP_URL)." >&2
+  exit 1
+fi
+
+if [[ -z "${WAREHOUSE_ID// }" ]]; then
+  echo "ERROR: SQL warehouse id required (arg4 or DATABRICKS_SQL_WAREHOUSE_ID)." >&2
   exit 1
 fi
 

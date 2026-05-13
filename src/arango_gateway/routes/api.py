@@ -15,7 +15,8 @@ from arango_gateway.services.arango_registry import (
     get_active_registry_row,
     upsert_registry_entry,
 )
-from arango_gateway.services.arango_http import ping_arango_endpoint
+from arango_gateway.services.arango_http import arango_json_request, ping_arango_endpoint
+from arango_gateway.services.arango_proxy_path import arango_http_proxy_path_allowed
 from arango_gateway.services.arango_uc_graph_import import (
     import_uc_graph_to_arango,
     iter_uc_graph_import_events,
@@ -37,6 +38,8 @@ from arango_gateway.services.uc_graph_jsonl_bundle import (
 from arango_gateway.services.arango_conversation import ask_arango_conversation
 
 api_blueprint = Blueprint("api", __name__)
+
+_ARANGO_HTTP_PROXY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 
 # Temp uploads for "Add Your Documents" until UC volume / ML pipeline wiring exists.
 _DATABRICKS_GRAPH_UPLOAD_SUBDIR = "arango_dashboard_uploads"
@@ -463,6 +466,80 @@ def ping_arango_from_registry():
         )
     except Exception as exc:
         return jsonify({"status": "error", "table": table_name, "error": str(exc)}), 500
+
+
+@api_blueprint.post("/arango/http")
+def arango_http_proxy():
+    """Forward JSON REST to Arango (active UC registry + gateway Basic auth).
+
+    Body: ``{"method": "GET|POST|...", "path": "/_db/.../_api/...", "body": optional}``.
+    Intended for the Arango MCP server in ``arango-agent`` and other workspace agents that cannot
+    reach Arango directly.
+    """
+    payload = request.get_json(silent=True) or {}
+    method = str(payload.get("method", "GET")).upper().strip()
+    raw_path = str(payload.get("path", "")).strip()
+    body = payload.get("body")
+    if body is None and "json" in payload:
+        body = payload.get("json")
+
+    if method not in _ARANGO_HTTP_PROXY_METHODS:
+        return jsonify({"ok": False, "error": f"unsupported method: {method}"}), 400
+
+    path = raw_path if raw_path.startswith("/") else f"/{raw_path}"
+    allow_admin = bool(current_app.config.get("ARANGO_HTTP_PROXY_ALLOW_ADMIN", False))
+    if not arango_http_proxy_path_allowed(path, allow_admin=allow_admin):
+        return jsonify(
+            {
+                "ok": False,
+                "error": "path not allowed for Arango HTTP proxy",
+                "path": path,
+            }
+        ), 403
+
+    table_name = current_app.config["ARANGO_REGISTRY_TABLE"]
+    warehouse_id = current_app.config["DATABRICKS_SQL_WAREHOUSE_ID"]
+    timeout_seconds = float(
+        current_app.config.get("ARANGO_HTTP_PROXY_TIMEOUT_SECONDS", 120.0)
+    )
+
+    try:
+        _ensure_registry_if_configured(table_name=table_name, warehouse_id=warehouse_id)
+        row = get_active_registry_row(table_name=table_name, warehouse_id=warehouse_id)
+        if not row:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "No active Arango registry row found.",
+                    "table": table_name,
+                }
+            ), 404
+
+        base = build_arango_web_ui_base_url(
+            str(row.get("protocol", "")),
+            str(row.get("ip_address", "")),
+            row.get("port", ""),
+        )
+        if not base:
+            return jsonify({"ok": False, "error": "invalid registry coordinates"}), 500
+
+        auth_user = (current_app.config.get("ARANGO_PING_BASIC_AUTH_USER") or "").strip()
+        auth_password = current_app.config.get("ARANGO_PING_BASIC_AUTH_PASSWORD")
+        verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
+
+        result = arango_json_request(
+            method=method,
+            base_url=base,
+            path=path,
+            payload=None if method == "GET" else body,
+            basic_auth_user=auth_user or None,
+            basic_auth_password=auth_password if auth_user else None,
+            verify_tls=verify_tls,
+            timeout_seconds=timeout_seconds,
+        )
+        return jsonify(result)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "body": {}}), 500
 
 
 @api_blueprint.get("/debug/startup-status")

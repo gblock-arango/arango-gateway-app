@@ -3,8 +3,7 @@
 import os
 from dataclasses import dataclass, field
 
-# Defaults align with ``app.yaml`` so local ``python app.py`` matches a typical first deploy.
-_DEFAULT_DATABRICKS_SQL_WAREHOUSE_ID = "473d40703241ee4c"
+# ``DATABRICKS_SQL_WAREHOUSE_ID`` has no code default — set via env, ``app.yaml``, or parent bundle.
 _DEFAULT_ARANGO_REGISTRY_TABLE = "workspace.default.arango_connection_registry"
 _DEFAULT_ARANGO_GATEWAY_REGISTRY_TABLE = "workspace.default.arango_gateway_registry"
 _DEFAULT_ARANGO_PING_BASIC_AUTH_PASSWORD = (
@@ -47,10 +46,7 @@ class AppConfig:
     """Application settings loaded from environment variables at instantiation time."""
 
     DATABRICKS_SQL_WAREHOUSE_ID: str = field(
-        default_factory=lambda: (
-            (os.environ.get("DATABRICKS_SQL_WAREHOUSE_ID", "") or "").strip()
-            or _DEFAULT_DATABRICKS_SQL_WAREHOUSE_ID
-        )
+        default_factory=lambda: (os.environ.get("DATABRICKS_SQL_WAREHOUSE_ID", "") or "").strip()
     )
     ARANGO_REGISTRY_TABLE: str = field(
         default_factory=lambda: (
@@ -91,6 +87,17 @@ class AppConfig:
     ARANGO_PING_TLS_VERIFY: bool = field(
         default_factory=lambda: os.environ.get("ARANGO_PING_TLS_VERIFY", "true").lower()
         == "true"
+    )
+    ARANGO_HTTP_PROXY_ALLOW_ADMIN: bool = field(
+        default_factory=lambda: os.environ.get(
+            "ARANGO_HTTP_PROXY_ALLOW_ADMIN", "false"
+        ).lower()
+        == "true"
+    )
+    ARANGO_HTTP_PROXY_TIMEOUT_SECONDS: float = field(
+        default_factory=lambda: float(
+            os.environ.get("ARANGO_HTTP_PROXY_TIMEOUT_SECONDS", "120") or "120"
+        )
     )
     DEBUG_STARTUP_CHECKS: bool = field(
         default_factory=lambda: os.environ.get("DEBUG_STARTUP_CHECKS", "false").lower()

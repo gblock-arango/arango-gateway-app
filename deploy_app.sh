@@ -7,7 +7,8 @@ set -euo pipefail
 #   ./deploy_app.sh
 #
 # Optional positional overrides: app-name, workspace source path, profile, tunnel URL, cluster,
-#   registry table, warehouse id (see script body for $1..$7).
+#   registry table, warehouse id (see script body for $1..$7). Set ``DATABRICKS_SQL_WAREHOUSE_ID``
+#   or pass warehouse as ``$7`` — no built-in default warehouse id.
 #
 # On first run, if the Databricks App name does not exist yet, the script runs
 # ``databricks apps create`` before ``databricks apps deploy``.
@@ -24,12 +25,32 @@ set -euo pipefail
 # Large fixtures: DEBUG_IMPORT_VOLUME_DIR=dbfs:/Volumes/...
 
 APP_NAME="${1:-arango-gateway-app}"
-SOURCE_CODE_PATH="${2:-/Workspace/Users/gareth.block@arangodb.com/arango-gateway-app}"
 PROFILE="${3:-}"
+
+_resolve_ws_user() {
+  local args=() user_json user
+  [[ -n "${PROFILE}" ]] && args=(--profile "${PROFILE}")
+  user_json="$(databricks current-user me "${args[@]}" 2>/dev/null)" || return 1
+  user="$(printf '%s' "${user_json}" | python3 -c 'import json,sys; d=json.load(sys.stdin); e=d.get("emails") or []; print(d.get("userName") or (e[0].get("value") if e else ""))' 2>/dev/null)" || return 1
+  [[ -n "${user}" ]] || return 1
+  printf '%s' "${user}"
+}
+
+if [[ -n "${2:-}" ]]; then
+  SOURCE_CODE_PATH="$2"
+else
+  _ws_user="$(_resolve_ws_user)" || {
+    echo "ERROR: could not resolve workspace user via 'databricks current-user me'." >&2
+    echo "Pass an explicit source path: ./deploy_app.sh ${APP_NAME} /Workspace/Users/<you>/${APP_NAME}" >&2
+    exit 1
+  }
+  SOURCE_CODE_PATH="/Workspace/Users/${_ws_user}/${APP_NAME}"
+fi
+
 LOCAL_ARANGO_URL="${4:-https://127.0.0.1:18529}"
 CLUSTER_NAME="${5:-local-minikube-dev}"
 REGISTRY_TABLE="${6:-workspace.default.arango_connection_registry}"
-WAREHOUSE_ID="${7:-473d40703241ee4c}"
+WAREHOUSE_ID="${DATABRICKS_SQL_WAREHOUSE_ID:-${7:-}}"
 ARANGO_GATEWAY_REGISTRY_TABLE="${ARANGO_GATEWAY_REGISTRY_TABLE:-workspace.default.arango_gateway_registry}"
 # Unity Catalog volume for gzip JSONL graph snapshots (/Volumes/<cat>/<schema>/<name>/uc_graph_snapshots).
 # Must match app env UC_GRAPH_VOLUME_NAME (default in app.yaml: arango_agent_volume).
@@ -222,6 +243,11 @@ fi
 
 APP_HEALTH_URL="${APP_URL}/health"
 APP_EMBED_UI_URL="${APP_URL}/embedded-arango/_db/_system/_admin/aardvark/index.html#login"
+
+if [[ -z "${WAREHOUSE_ID// }" ]]; then
+  echo "ERROR: DATABRICKS_SQL_WAREHOUSE_ID is not set (export it, set in app.yaml, use arango-platform-bundle variables, or pass as 7th positional arg to deploy_app.sh)." >&2
+  exit 1
+fi
 
 run_sql_statement() {
   local statement="$1"

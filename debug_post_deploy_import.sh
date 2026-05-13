@@ -8,7 +8,7 @@
 #
 # 2) Run directly once the Databricks app is online (same CLI auth as databricks sync):
 #      ./debug_post_deploy_import.sh
-#      ./debug_post_deploy_import.sh my-app DEFAULT https://127.0.0.1:18529 workspace.default.arango_connection_registry 473d40703241ee4c
+#      ./debug_post_deploy_import.sh my-app DEFAULT https://127.0.0.1:18529 workspace.default.arango_connection_registry <warehouse-id>
 #    Env overrides: PROFILE, DEBUG_IMPORT_VOLUME_DIR, DEBUG_IMPORT_GRAPH_NAME, REGISTRY_TABLE,
 #    WAREHOUSE_ID or DATABRICKS_SQL_WAREHOUSE_ID, APP_SERVICE_PRINCIPAL_CLIENT_ID (optional;
 #    fetched via databricks apps get if unset), ARANGO_PING_BASIC_AUTH_*.
@@ -213,7 +213,7 @@ Usage:
   ./debug_post_deploy_import.sh [APP_NAME] [PROFILE] [LOCAL_ARANGO_URL] [REGISTRY_TABLE] [WAREHOUSE_ID]
 
 Defaults match deploy_app.sh. PROFILE may be empty (use DATABRICKS_HOST + token env).
-WAREHOUSE_ID falls back to DATABRICKS_SQL_WAREHOUSE_ID or a built-in default.
+WAREHOUSE_ID uses arg5, then WAREHOUSE_ID, then DATABRICKS_SQL_WAREHOUSE_ID (no built-in default).
 
 Environment (optional):
   DEBUG_IMPORT_VOLUME_DIR, DEBUG_IMPORT_GRAPH_NAME, ARANGO_PING_BASIC_AUTH_USER,
@@ -231,7 +231,7 @@ EOF
   PROFILE="${2:-${PROFILE:-}}"
   LOCAL_ARANGO_URL="${3:-${LOCAL_ARANGO_URL:-https://127.0.0.1:18529}}"
   REGISTRY_TABLE="${4:-${REGISTRY_TABLE:-workspace.default.arango_connection_registry}}"
-  WAREHOUSE_ID="${5:-${WAREHOUSE_ID:-${DATABRICKS_SQL_WAREHOUSE_ID:-473d40703241ee4c}}}"
+  WAREHOUSE_ID="${5:-${WAREHOUSE_ID:-${DATABRICKS_SQL_WAREHOUSE_ID:-}}}"
 
   DEBUG_IMPORT_VOLUME_DIR="${DEBUG_IMPORT_VOLUME_DIR:-}"
   DEBUG_IMPORT_GRAPH_NAME="${DEBUG_IMPORT_GRAPH_NAME:-debug_import_graph}"
@@ -242,6 +242,11 @@ EOF
     PROFILE_ARGS=(--profile "${PROFILE}")
   else
     PROFILE_ARGS=()
+  fi
+
+  if [[ -z "${WAREHOUSE_ID// }" ]]; then
+    echo "ERROR: WAREHOUSE_ID is required (arg5, env WAREHOUSE_ID, or DATABRICKS_SQL_WAREHOUSE_ID)." >&2
+    exit 1
   fi
 
   if [[ -z "${APP_SERVICE_PRINCIPAL_CLIENT_ID:-}" ]]; then

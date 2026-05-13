@@ -12,16 +12,21 @@ set -euo pipefail
 #     https://example.trycloudflare.com \
 #     local-minikube-dev \
 #     workspace.default.arango_connection_registry \
-#     473d40703241ee4c
+#     <your-sql-warehouse-id>
 
 TUNNEL_INPUT="${1:-${ARANGO_TUNNEL_URL:-}}"
 CLUSTER_NAME="${2:-local-minikube-dev}"
 REGISTRY_TABLE="${3:-workspace.default.arango_connection_registry}"
-WAREHOUSE_ID="${4:-${DATABRICKS_SQL_WAREHOUSE_ID:-473d40703241ee4c}}"
+WAREHOUSE_ID="${4:-${DATABRICKS_SQL_WAREHOUSE_ID:-}}"
 PROFILE="${5:-}"
 
 if [[ -z "${TUNNEL_INPUT}" ]]; then
   echo "ERROR: tunnel URL/host is required (arg1 or ARANGO_TUNNEL_URL)." >&2
+  exit 1
+fi
+
+if [[ -z "${WAREHOUSE_ID// }" ]]; then
+  echo "ERROR: SQL warehouse id is required (arg4 or DATABRICKS_SQL_WAREHOUSE_ID)." >&2
   exit 1
 fi
 

@@ -7,88 +7,12 @@ Edge collection uses ``_from`` / ``_to`` pointing at that vertex collection.
 
 from __future__ import annotations
 
-import base64
 import json
-import ssl
 from typing import Any, Callable, Iterator
-from urllib import error, request
+
+from arango_gateway.services.arango_http import arango_json_request
 
 ProgressCallback = Callable[[int, int], None]
-
-
-def _normalize_base_url(base_url: str) -> str:
-    return (base_url or "").strip().rstrip("/")
-
-
-def _arango_json_call(
-    *,
-    method: str,
-    base_url: str,
-    path: str,
-    payload: Any | None,
-    basic_auth_user: str | None,
-    basic_auth_password: str | None,
-    verify_tls: bool,
-    timeout_seconds: float,
-) -> dict[str, Any]:
-    """HTTP JSON request; path must start with / (e.g. /_db/mydb/_api/collection)."""
-    url = f"{_normalize_base_url(base_url)}{path}"
-    data: bytes | None
-    if payload is None:
-        data = None
-    else:
-        data = json.dumps(payload).encode("utf-8")
-
-    req = request.Request(url=url, method=method, data=data)
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    if basic_auth_user:
-        password = (
-            basic_auth_password if basic_auth_password is not None else ""
-        )
-        token = base64.b64encode(
-            f"{basic_auth_user}:{password}".encode("utf-8")
-        ).decode("ascii")
-        req.add_header("Authorization", f"Basic {token}")
-
-    ssl_ctx: ssl.SSLContext | None = None
-    if url.lower().startswith("https:") and not verify_tls:
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-
-    open_kw: dict[str, Any] = {"timeout": timeout_seconds}
-    if ssl_ctx is not None:
-        open_kw["context"] = ssl_ctx
-
-    try:
-        with request.urlopen(req, **open_kw) as resp:
-            body_text = resp.read().decode("utf-8", errors="replace")
-            body: Any = json.loads(body_text) if body_text.strip() else {}
-            return {
-                "ok": True,
-                "status_code": resp.getcode(),
-                "body": body,
-            }
-    except error.HTTPError as exc:
-        body_text = exc.read().decode("utf-8", errors="replace")
-        try:
-            body = json.loads(body_text) if body_text.strip() else {}
-        except json.JSONDecodeError:
-            body = {"raw": body_text}
-        return {
-            "ok": False,
-            "status_code": exc.code,
-            "body": body,
-        }
-    except Exception as exc:
-        return {
-            "ok": False,
-            "status_code": None,
-            "error": str(exc),
-            "body": {},
-        }
 
 
 def _collection_exists_error(body: dict[str, Any], status_code: int | None) -> bool:
@@ -115,7 +39,7 @@ def ensure_arango_collection(
     """Create collection if missing (type 2=document, 3=edge)."""
     db = database.strip() or "_system"
     path = f"/_db/{db}/_api/collection"
-    result = _arango_json_call(
+    result = arango_json_request(
         method="POST",
         base_url=base_url,
         path=path,
@@ -155,7 +79,7 @@ def _batch_insert_documents(
     coll = collection.strip()
     qs = "overwriteMode=replace&waitForSync=false&returnNew=false"
     path = f"/_db/{db}/_api/document/{coll}?{qs}"
-    result = _arango_json_call(
+    result = arango_json_request(
         method="POST",
         base_url=base_url,
         path=path,
