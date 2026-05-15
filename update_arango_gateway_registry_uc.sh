@@ -118,6 +118,9 @@ MERGE_SQL="MERGE INTO ${FQTBL} t USING (SELECT '${ESC_URL}' AS base_url, '${ESC_
 UPSERT_ATTEMPTS="${GATEWAY_REGISTRY_UC_UPSERT_RETRIES:-10}"
 for attempt in $(seq 1 "${UPSERT_ATTEMPTS}"); do
   if run_sql "${MERGE_SQL}"; then
+    if [[ "${attempt}" -gt 1 ]]; then
+      echo "NOTE: UC gateway registry MERGE succeeded on attempt ${attempt}/${UPSERT_ATTEMPTS} (retry after earlier failure)." >&2
+    fi
     break
   fi
   if [[ "${attempt}" -ge "${UPSERT_ATTEMPTS}" ]]; then
