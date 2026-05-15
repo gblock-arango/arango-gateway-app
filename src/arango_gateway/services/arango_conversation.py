@@ -115,8 +115,9 @@ def ask_arango_conversation(
     # Local development stub until minikube / ADA is wired.
     cid = (conversation_id or "").strip() or str(uuid.uuid4())
     stub = (
-        "Arango AI (stub): received your message. Set ARANGO_CONVERSATION_URL to a "
-        "cluster ADA chat endpoint to forward traffic from this app.\n\n"
+        "Arango AI (stub): received your message. Set **ARANGO_CONVERSATION_URL** to your cluster "
+        "ADA chat HTTPS URL. The dashboard usually proxies chat via **arango-agent** "
+        "(configure the URL there); this gateway route is for direct callers.\n\n"
         f"---\n\n{text[:2000]}"
     )
     return {
