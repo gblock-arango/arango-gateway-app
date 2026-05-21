@@ -1,6 +1,6 @@
 # arango-gateway-app — agent-oriented reference
 
-This document is written for **automated coding agents** and **human operators** who need a single, dense map of **intent**, **HTTP surface**, **Unity Catalog contracts**, **configuration precedence**, and **relationships to sibling apps** (`arango-dashboard-app`, `arango-agent`). It complements the shorter `README.md` with formal detail.
+This document is written for **automated coding agents** and **human operators** who need a single, dense map of **intent**, **HTTP surface**, **Unity Catalog contracts**, **configuration precedence**, and **relationships to sibling apps** (`arango-dashboard-app`, `arango-mcp-app`). It complements the shorter `README.md` with formal detail.
 
 ---
 
@@ -16,9 +16,9 @@ At a high level it does **four** things:
 
 3. **UC → graph → Arango** — Exposes APIs to **extract Unity Catalog metadata** into a DataHub-aligned graph, optionally **export gzip JSONL** to a UC volume, and **bulk-import** nodes/edges into Arango using credentials from the active registry row and `ARANGO_PING_BASIC_AUTH_*`.
 
-4. **Server-side Arango API access for agents** — `POST /api/arango/http` forwards JSON-shaped REST calls to Arango for identities that **cannot** reach the tunnel/cluster directly (e.g. `arango-agent` MCP). Paths are **allowlisted** (`arango_proxy_path.py`).
+4. **Server-side Arango API access for agents** — `POST /api/arango/http` forwards JSON-shaped REST calls to Arango for identities that **cannot** reach the tunnel/cluster directly (e.g. `arango-mcp-app` MCP). Paths are **allowlisted** (`arango_proxy_path.py`).
 
-Genie-related fields exist on `AppConfig` in `config.py` for historical / shared-dataclass parity; **this app does not implement Genie routes** — Genie lives on **arango-agent** and the dashboard.
+Genie-related fields exist on `AppConfig` in `config.py` for historical / shared-dataclass parity; **this app does not implement Genie routes** — Genie lives on **arango-mcp-app** and the dashboard.
 
 ---
 
@@ -72,7 +72,7 @@ Duplicate mirror: `GET /api/health` returns the same payload (blueprint convenie
 | `POST` | `/api/arango/registry/init` | `CREATE TABLE IF NOT EXISTS` path for operators. |
 | `POST` | `/api/arango/registry` | Upsert active row: `cluster_name`, `ip_address`, `port`, `protocol` (marks prior active rows inactive, inserts new active row — see `upsert_registry_entry`). |
 | `POST` | `/api/arango/ping` | Optional JSON `path` (default `/_api/version`). Probes Arango using active UC row + `ARANGO_PING_BASIC_AUTH_*`. |
-| `POST` | `/api/arango/http` | **JSON Arango proxy**: body `method`, `path`, optional `body`/`json`. Resolves base URL from UC; enforces `arango_http_proxy_path_allowed`. Intended for **arango-agent** MCP and similar. |
+| `POST` | `/api/arango/http` | **JSON Arango proxy**: body `method`, `path`, optional `body`/`json`. Resolves base URL from UC; enforces `arango_http_proxy_path_allowed`. Intended for **arango-mcp-app** MCP and similar. |
 | `GET` | `/api/debug/startup-status` | Query `refresh=true` to re-run `run_startup_debug_check`: UC registry + Arango ping (no Genie). |
 | `POST` | `/api/databricks-graph/uc-tables` | UC table discovery for dashboard multiselect (options via `discovery_options_from_request_payload`). |
 | `POST` | `/api/databricks-graph/extract-schema` | Full UC metadata graph extract + optional JSONL export + optional Arango import. Body options in `datahub_unity_catalog_workflow.options_from_request_payload`. If `stream_progress: true`, returns **NDJSON** stream (`application/x-ndjson`). |
@@ -97,7 +97,7 @@ After `ensure_registry_table`, the code attempts **`GRANT SELECT, MODIFY … TO 
 
 **Columns:** `base_url`, `app_name`, `is_active`, `updated_at`.
 
-- **Purpose:** Publish the gateway Databricks App’s **public** `https://…databricksapps.com` URL for **arango-dashboard-app** (iframe/embed targets) and **arango-agent** (optional explicit gateway resolution elsewhere).
+- **Purpose:** Publish the gateway Databricks App’s **public** `https://…databricksapps.com` URL for **arango-dashboard-app** (iframe/embed targets) and **arango-mcp-app** (optional explicit gateway resolution elsewhere).
 - **Writers:** `publish_self_gateway_url_to_uc_if_configured` on **each Gunicorn worker** startup (MERGE + retry), and `update_arango_gateway_registry_uc.sh` from `deploy_app.sh`. Both use atomic **MERGE** semantics to avoid duplicate `is_active=true` rows under concurrency.
 
 ### 4.3 UC volume (`UC_GRAPH_VOLUME_NAME` / `UC_GRAPH_SNAPSHOT_BASE`)
@@ -163,7 +163,7 @@ All runtime configuration is **`os.environ` → `AppConfig`** (`config.py`). Dat
 
 ### 5.6 Genie-related keys on `AppConfig`
 
-`GENIE_SPACE_ID`, `GENIE_SPACE_REGISTRY_TABLE`, `GENIE_AUTO_PROVISION`, etc. are defined on `AppConfig` but **are not wired** in `arango_gateway` routes. **Do not assume** Genie behavior from this app — use **arango-agent** and its `genie_registry.py` / `app.yaml`.
+`GENIE_SPACE_ID`, `GENIE_SPACE_REGISTRY_TABLE`, `GENIE_AUTO_PROVISION`, etc. are defined on `AppConfig` but **are not wired** in `arango_gateway` routes. **Do not assume** Genie behavior from this app — use **arango-mcp-app** and its `genie_registry.py` / `app.yaml`.
 
 ---
 
@@ -190,7 +190,7 @@ The monorepo bundle lives at `arango-platform-bundle/` with `databricks.yml` var
 
 ---
 
-## 7. How this app cooperates with **arango-dashboard-app** and **arango-agent**
+## 7. How this app cooperates with **arango-dashboard-app** and **arango-mcp-app**
 
 ### 7.1 arango-dashboard-app
 
@@ -199,7 +199,7 @@ The monorepo bundle lives at `arango-platform-bundle/` with `databricks.yml` var
 - **Calls** gateway HTTP APIs for UC graph extract, streaming progress, registry init, etc. (see dashboard `app.yaml` and templates).
 - Does **not** need direct network access to Arango if all Arango traffic goes through the gateway embed path and APIs.
 
-### 7.2 arango-agent
+### 7.2 arango-mcp-app
 
 - **Reads** `ARANGO_GATEWAY_REGISTRY_TABLE` (and optional `ARANGO_GATEWAY_BASE_URL`) to find the gateway base URL for gateway-backed Arango operations.
 - **Reads** `ARANGO_REGISTRY_TABLE` (SELECT) for parity with deploy grants — cluster coordinates are still “owned” by the gateway + deploy scripts for writes.
@@ -226,7 +226,7 @@ The monorepo bundle lives at `arango-platform-bundle/` with `databricks.yml` var
 2. **Any new “single active row” UC writer** must use **one atomic MERGE** (or equivalent) plus retry on Delta concurrent-write errors — not `UPDATE` + `INSERT` split across statements.
 3. **New Arango-facing HTTP** from workspace agents should go through **`POST /api/arango/http`** with path validation, or extend the allowlist deliberately in `arango_proxy_path.py` with security review.
 4. **Embed changes** must preserve Aardvark auth behavior documented in `README.md` (`/_open/auth` without server Basic, cookie SameSite rules).
-5. **Do not assume Genie** in this package — keep Genie changes in **arango-agent**.
+5. **Do not assume Genie** in this package — keep Genie changes in **arango-mcp-app**.
 
 ---
 
@@ -247,6 +247,6 @@ The monorepo bundle lives at `arango-platform-bundle/` with `databricks.yml` var
 
 - `README.md` in this directory — operator quick start, local run, deploy notes.
 - `arango-platform-bundle/README.md` — multi-app bundle layout.
-- `arango-agent/README_Agent.md` — agent app architecture (Genie, MCP, gateway consumption).
+- `arango-mcp-app/README_Agent.md` — agent app architecture (Genie, MCP, gateway consumption).
 
 This file should be updated when **new `/api` routes**, **new env vars**, or **bundle variable contracts** change.

@@ -3,14 +3,37 @@ command:
   - "-lc"
   - "export PYTHONPATH=src && gunicorn wsgi:app --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} --workers 2 --timeout 660"
 
-# ``DATABRICKS_SQL_WAREHOUSE_ID``: set here for solo deploy, or rely on **arango-platform-bundle**
-# ``sql_warehouse_id`` (``resources/apps.yml`` injects ``${var.sql_warehouse_id}`` and overrides
-# this entry on bundle deploy). ``config.py`` does not supply a default — env only.
+# ``DATABRICKS_SQL_WAREHOUSE_ID``: set here for solo ``databricks apps deploy`` / ``./deploy_app.sh``,
+# or override from **arango-platform-bundle** ``resources/apps.yml`` (``${var.sql_warehouse_id}``).
+# ``config.py`` does not invent a warehouse id — the value must come from env (this file, App UI,
+# or bundle). Replace the hex below with your workspace warehouse if different.
+#
+# This app publishes its public base URL to ``ARANGO_GATEWAY_REGISTRY_TABLE`` (read by arango-dashboard-app
+# and arango-mcp-app). Arango connection coordinates are stored in ``ARANGO_REGISTRY_TABLE``; graph
+# JSONL exports use ``UC_GRAPH_VOLUME_NAME`` / ``UC_GRAPH_SNAPSHOT_BASE``.
 
 env:
+  # ---------------------------------------------------------------------------
+  # REQUIRED — set (or confirm) for your workspace / bundle
+  # ---------------------------------------------------------------------------
   - name: DATABRICKS_SQL_WAREHOUSE_ID
-    description: "SQL Warehouse ID for Unity Catalog SQL (registry, graph metadata); required for UC operations"
+    description: >-
+      (Required) SQL warehouse id (hex) for Unity Catalog SQL (connection registry, graph metadata,
+      gateway URL registry). Replace the placeholder with your warehouse id if this file is copied
+      into a new workspace.
     value: "473d40703241ee4c"
+  - name: ARANGO_PING_BASIC_AUTH_USER
+    description: "Optional user for Arango ping and embed proxy"
+    value: "root"
+  - name: ARANGO_PING_BASIC_AUTH_PASSWORD
+    description: "Arango basic-auth password (dev default matches single-node-arango-on-minikube; override in production)"
+    value: "8c1bc9344c886819859534a5ac951412c650870662228617cfbb69023489afd2"
+    
+  # ---------------------------------------------------------------------------
+  # OPTIONAL — defaults below; UC / runtime fills many empty URL fields
+  # ---------------------------------------------------------------------------
+
+  # --- UC connection registry & graph volume ---
   - name: ARANGO_REGISTRY_TABLE
     description: "Unity Catalog table storing Arango connection coordinates (catalog.schema.table); with UC_GRAPH_VOLUME_NAME drives default UC_GRAPH_SNAPSHOT_BASE when UC_GRAPH_SNAPSHOT_BASE is unset"
     value: "workspace.default.arango_connection_registry"
@@ -23,21 +46,19 @@ env:
   - name: ARANGO_REGISTRY_AUTO_CREATE
     description: "If true, app creates schema/table on first registry call"
     value: "true"
+
+  # --- Gateway self-registry (publishes this app's public base_url for other apps) ---
   - name: ARANGO_GATEWAY_REGISTRY_TABLE
     description: "UC Delta table (catalog.schema.table) where this gateway publishes its public base URL for other apps (e.g. arango-dashboard-app)"
     value: "workspace.default.arango_gateway_registry"
   - name: ARANGO_GATEWAY_REGISTRY_AUTO_CREATE
     description: "If true, app creates ARANGO_GATEWAY_REGISTRY_TABLE on startup and upserts the active gateway URL (from Apps API + DATABRICKS_APP_NAME)"
     value: "true"
+
+  # --- Arango connectivity probe & database ---
   - name: ARANGO_PING_TIMEOUT_SECONDS
     description: "Timeout in seconds for outbound Arango connectivity probe"
     value: "5"
-  - name: ARANGO_PING_BASIC_AUTH_USER
-    description: "Optional user for Arango ping and embed proxy"
-    value: "root"
-  - name: ARANGO_PING_BASIC_AUTH_PASSWORD
-    description: "Arango basic-auth password (dev default matches single-node-arango-on-minikube; override in production)"
-    value: "8c1bc9344c886819859534a5ac951412c650870662228617cfbb69023489afd2"
   - name: ARANGO_PING_TLS_VERIFY
     description: "If false, skip TLS certificate verification (dev only)"
     value: "true"
@@ -47,24 +68,30 @@ env:
   - name: ARANGO_UC_IMPORT_BATCH_SIZE
     description: "Documents per HTTP batch when loading UC metadata into Arango"
     value: "300"
-  - name: DEBUG_STARTUP_CHECKS
-    description: "If true, run startup diagnostics for UC registry + Arango reachability"
-    value: "true"
-  - name: DEBUG_WEBHOOK_URL
-    description: "Optional webhook URL for startup debug payloads"
-    value: ""
+
+  # --- Embed proxy / iframe ---
   - name: ARANGO_UI_IFRAME_URL
     description: "Optional override for Arango HTTP origin for embed proxy"
     value: ""
   - name: ARANGO_EMBED_COOKIE_SAMESITE_NONE
     description: "When true, Set-Cookie from Arango is rewritten with SameSite=None; Secure so JWT session cookies can stick in cross-site iframes (Databricks)"
     value: "true"
+
+  # --- Outbound ADA / conversation forwarding ---
   - name: ARANGO_CONVERSATION_URL
     description: "Optional URL for POST /api/arango/chat to forward to; empty => stub"
     value: ""
   - name: ARANGO_CONVERSATION_TIMEOUT_SECONDS
     description: "HTTP timeout for outbound ARANGO_CONVERSATION_URL requests"
     value: "120"
+
+  # --- Diagnostics ---
+  - name: DEBUG_STARTUP_CHECKS
+    description: "If true, run startup diagnostics for UC registry + Arango reachability"
+    value: "true"
+  - name: DEBUG_WEBHOOK_URL
+    description: "Optional webhook URL for startup debug payloads"
+    value: ""
 
 resources:
   - name: sql-warehouse

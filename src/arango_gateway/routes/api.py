@@ -473,7 +473,7 @@ def arango_http_proxy():
     """Forward JSON REST to Arango (active UC registry + gateway Basic auth).
 
     Body: ``{"method": "GET|POST|...", "path": "/_db/.../_api/...", "body": optional}``.
-    Intended for the Arango MCP server in ``arango-agent`` and other workspace agents that cannot
+    Intended for the Arango MCP server in ``arango-mcp-app`` and other workspace agents that cannot
     reach Arango directly.
     """
     payload = request.get_json(silent=True) or {}

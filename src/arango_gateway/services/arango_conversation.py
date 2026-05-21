@@ -116,7 +116,7 @@ def ask_arango_conversation(
     cid = (conversation_id or "").strip() or str(uuid.uuid4())
     stub = (
         "Arango AI (stub): received your message. Set **ARANGO_CONVERSATION_URL** to your cluster "
-        "ADA chat HTTPS URL. The dashboard usually proxies chat via **arango-agent** "
+        "ADA chat HTTPS URL. The dashboard usually proxies chat via **arango-mcp-app** "
         "(configure the URL there); this gateway route is for direct callers.\n\n"
         f"---\n\n{text[:2000]}"
     )
