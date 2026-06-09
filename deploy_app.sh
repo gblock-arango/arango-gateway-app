@@ -203,6 +203,30 @@ databricks apps deploy "${APP_NAME}" \
   --source-code-path "${SOURCE_CODE_PATH}" \
   "${PROFILE_ARGS[@]}"
 
+wait_for_app_running() {
+  local json app_state compute_state
+  echo "Waiting for '${APP_NAME}' to reach RUNNING (compute ACTIVE) after deploy..."
+  for _ in $(seq 1 90); do
+    json="$(databricks apps get "${APP_NAME}" --output json "${PROFILE_ARGS[@]}" 2>/dev/null || true)"
+    app_state="$(
+      "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("app_status") or {}).get("state",""))' <<< "${json}" 2>/dev/null || true
+    )"
+    compute_state="$(
+      "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("compute_status") or {}).get("state",""))' <<< "${json}" 2>/dev/null || true
+    )"
+    if [[ "${app_state}" == "RUNNING" && "${compute_state}" == "ACTIVE" ]]; then
+      echo "App is RUNNING (compute ACTIVE)."
+      return 0
+    fi
+    sleep 2
+  done
+  echo "WARNING: '${APP_NAME}' did not reach RUNNING/ACTIVE within ~3 minutes (app=${app_state:-unknown}, compute=${compute_state:-unknown})." >&2
+  echo "         URLs below may hang until the app finishes starting — check Databricks Apps UI logs." >&2
+  return 1
+}
+
+wait_for_app_running || true
+
 echo "Fetching app metadata..."
 APP_JSON="$(databricks apps get "${APP_NAME}" --output json "${PROFILE_ARGS[@]}")"
 
@@ -408,6 +432,18 @@ echo "DATABRICKS_APP_HEALTH_URL=${APP_HEALTH_URL}"
 echo "DATABRICKS_APP_EMBED_UI_URL=${APP_EMBED_UI_URL}"
 # OSC 8 hyperlink (iTerm2, VS Code terminal, GNOME Terminal 3.26+, etc.).
 printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "${APP_HEALTH_URL}" "→ Open gateway health (hyperlink)"
+echo "NOTE: /health returns immediately once gunicorn is up; UC registry publish runs in background."
+echo "      Browser: open while logged into Databricks (Apps URLs are not anonymous). Anonymous curl often gets 302/401, not JSON."
+if command -v curl >/dev/null 2>&1; then
+  http_code="$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 15 "${APP_HEALTH_URL}" || echo "000")"
+  if [[ "${http_code}" == "200" ]]; then
+    echo "Health probe: HTTP 200 (reachable)."
+  elif [[ "${http_code}" == "000" ]]; then
+    echo "Health probe: timed out — app may still be starting; retry in 30s or check Apps logs."
+  else
+    echo "Health probe: HTTP ${http_code} (expected 302/401 without Databricks session cookie — use browser while signed in)."
+  fi
+fi
 if [[ -n "${APP_URL_NUMERIC_SUFFIX}" ]]; then
   echo "DATABRICKS_APP_URL_NUMERIC_SUFFIX=${APP_URL_NUMERIC_SUFFIX}  (from hostname in apps get url)"
 else

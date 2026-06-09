@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import threading
+from pathlib import Path
+
 from flask import Flask, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -11,11 +16,43 @@ from arango_gateway.routes.embed import arango_embed_bp
 from arango_gateway.services.gateway_url_registry import publish_self_gateway_url_to_uc_if_configured
 from arango_gateway.services.startup_debug import run_startup_debug_check
 
+log = logging.getLogger(__name__)
+_STARTUP_LOCK = Path("/tmp/arango-gateway-startup.lock")
+
+
+def _run_background_startup(app: Flask) -> None:
+    """UC publish + optional Arango probe — must not block ``/health`` or gunicorn boot."""
+    acquired = False
+    try:
+        fd = os.open(_STARTUP_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+        acquired = True
+    except FileExistsError:
+        log.info("gateway background startup skipped (another worker holds lock)")
+        app.extensions["startup_debug_status"] = {
+            "status": "skipped",
+            "message": "Startup diagnostics ran on another worker.",
+        }
+        return
+
+    try:
+        publish_self_gateway_url_to_uc_if_configured(app)
+        if app.config.get("DEBUG_STARTUP_CHECKS", False):
+            app.extensions["startup_debug_status"] = run_startup_debug_check(app)
+    except Exception:
+        log.exception("gateway background startup failed")
+        app.extensions["startup_debug_status"] = {
+            "status": "error",
+            "message": "Background startup failed — see app logs.",
+        }
+    finally:
+        if acquired:
+            _STARTUP_LOCK.unlink(missing_ok=True)
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config.from_object(AppConfig())
-    publish_self_gateway_url_to_uc_if_configured(app)
 
     @app.route("/health")
     def health_root():
@@ -35,11 +72,15 @@ def create_app() -> Flask:
     app.register_blueprint(api_blueprint, url_prefix="/api")
 
     app.extensions["startup_debug_status"] = {
-        "status": "not_run",
-        "message": "Set DEBUG_STARTUP_CHECKS=true to run startup diagnostics.",
+        "status": "pending",
+        "message": "Startup diagnostics running in background…",
     }
-    if app.config.get("DEBUG_STARTUP_CHECKS", False):
-        app.extensions["startup_debug_status"] = run_startup_debug_check(app)
+    threading.Thread(
+        target=_run_background_startup,
+        args=(app,),
+        name="gateway-background-startup",
+        daemon=True,
+    ).start()
 
     app.wsgi_app = ProxyFix(
         app.wsgi_app,
