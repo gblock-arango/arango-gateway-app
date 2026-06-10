@@ -266,6 +266,7 @@ if [[ -z "${APP_SERVICE_PRINCIPAL_CLIENT_ID}" ]]; then
 fi
 
 APP_HEALTH_URL="${APP_URL}/health"
+APP_HEALTH_EXTENDED_URL="${APP_URL}/api/workflow/debug/startup-status?refresh=true"
 APP_EMBED_UI_URL="${APP_URL}/embedded-arango/_db/_system/_admin/aardvark/index.html#login"
 
 if [[ -z "${WAREHOUSE_ID// }" ]]; then
@@ -429,6 +430,7 @@ fi
 echo
 echo "DATABRICKS_APP_URL=${APP_URL}"
 echo "DATABRICKS_APP_HEALTH_URL=${APP_HEALTH_URL}"
+echo "DATABRICKS_APP_HEALTH_EXTENDED_URL=${APP_HEALTH_EXTENDED_URL}"
 echo "DATABRICKS_APP_EMBED_UI_URL=${APP_EMBED_UI_URL}"
 # OSC 8 hyperlink (iTerm2, VS Code terminal, GNOME Terminal 3.26+, etc.).
 printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "${APP_HEALTH_URL}" "→ Open gateway health (hyperlink)"

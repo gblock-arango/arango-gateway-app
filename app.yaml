@@ -1,7 +1,7 @@
 command:
   - "bash"
   - "-lc"
-  - "export PYTHONPATH=src && gunicorn wsgi:app --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} --workers 2 --timeout 660"
+  - "export PYTHONPATH=src && gunicorn wsgi:app --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} --workers 4 --timeout 660"
 
 # ``DATABRICKS_SQL_WAREHOUSE_ID``: set here for solo ``databricks apps deploy`` / ``./deploy_app.sh``,
 # or override from **arango-platform-bundle** ``resources/apps.yml`` (``${var.sql_warehouse_id}``).
