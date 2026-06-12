@@ -98,7 +98,7 @@ After `ensure_registry_table`, the code attempts **`GRANT SELECT, MODIFY … TO 
 **Columns:** `base_url`, `app_name`, `is_active`, `updated_at`.
 
 - **Purpose:** Publish the gateway Databricks App’s **public** `https://…databricksapps.com` URL for **arango-dashboard-app** (iframe/embed targets) and **arango-mcp-app** (optional explicit gateway resolution elsewhere).
-- **Writers:** `publish_self_gateway_url_to_uc_if_configured` on **each Gunicorn worker** startup (MERGE + retry), and `update_arango_gateway_registry_uc.sh` from `deploy_app.sh`. Both use atomic **MERGE** semantics to avoid duplicate `is_active=true` rows under concurrency.
+- **Writers:** `publish_self_gateway_url_to_uc_if_configured` on worker startup (background thread per Gunicorn worker; a file lock ensures only one runs — others skip), and `update_arango_gateway_registry_uc.sh` from `deploy_app.sh`. Both use atomic **MERGE** semantics to avoid duplicate `is_active=true` rows under concurrency.
 
 ### 4.3 UC volume (`UC_GRAPH_VOLUME_NAME` / `UC_GRAPH_SNAPSHOT_BASE`)
 
@@ -208,14 +208,14 @@ The monorepo bundle lives at `arango-platform-bundle/` with `databricks.yml` var
 ### 7.3 deploy scripts and UC ownership
 
 - `deploy_app.sh` **pre-creates** registry Delta tables and grants **`account users`** and the **gateway app service principal** so first-boot races (app UNAVAILABLE before SQL) do not fail `GRANT` with `TABLE_DOES_NOT_EXIST`.
-- `update_arango_gateway_registry_uc.sh` and in-app `gateway_url_registry.py` use **MERGE** upserts so **two Gunicorn workers** plus deploy script do not leave multiple `is_active=true` rows.
+- `update_arango_gateway_registry_uc.sh` and in-app `gateway_url_registry.py` use **MERGE** upserts so **four Gunicorn workers** plus deploy script do not leave multiple `is_active=true` rows.
 
 ---
 
 ## 8. Process model and startup order
 
-- **Command** (`app.yaml`): `gunicorn wsgi:app` with **`--workers 2`**. Each worker runs `create_app()` independently.
-- **First actions in `create_app()`:** load `AppConfig`; **`publish_self_gateway_url_to_uc_if_configured`** (UC MERGE); register routes; optionally **`run_startup_debug_check`** when `DEBUG_STARTUP_CHECKS=true`.
+- **Command** (`app.yaml`): `gunicorn wsgi:app` with **`--workers 4`**. Each worker runs `create_app()` independently.
+- **Startup in `create_app()`:** load `AppConfig`; register routes; start daemon thread **`gateway-background-startup`** for **`publish_self_gateway_url_to_uc_if_configured`** (UC MERGE) and optional **`run_startup_debug_check`** when `DEBUG_STARTUP_CHECKS=true`. A file lock (`/tmp/arango-gateway-startup.lock`) ensures only one worker runs UC publish + diagnostics so **`/health`** returns immediately on all workers.
 - **`ProxyFix`:** trusts `X-Forwarded-*` from the Databricks Apps edge so URL generation and logging see external scheme/host.
 
 ---

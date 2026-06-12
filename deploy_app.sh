@@ -16,6 +16,9 @@ set -euo pipefail
 # If ``apps create`` was interrupted (Ctrl+C) or the app was stopped, ``apps deploy`` can fail with
 # "not in RUNNING state". The script then runs ``databricks apps start`` and waits.
 #
+# ``apps start`` can kick off a platform deployment that races with ``apps deploy`` ("pending deployment
+# in progress"). The script waits for that deployment to finish and retries deploy automatically.
+#
 # Genie lives on arango-dashboard-app; this script does not create Genie registry tables.
 #
 # Optional debug import: DEBUG_POST_DEPLOY_IMPORT=true ./deploy_app.sh ...
@@ -94,10 +97,35 @@ else
   PROFILE_ARGS=()
 fi
 
+_app_active_deployment_state() {
+  local json="$1"
+  "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("active_deployment") or {}).get("status",{}).get("state",""))' <<< "${json}" 2>/dev/null || true
+}
+
+_wait_for_active_deployment_idle() {
+  local json deploy_state waited=0
+  local max_wait="${DEPLOY_WAIT_ACTIVE_DEPLOYMENT_SEC:-900}"
+  local poll="${DEPLOY_WAIT_ACTIVE_DEPLOYMENT_POLL_SEC:-10}"
+  while (( waited < max_wait )); do
+    if ! json="$(databricks apps get "${APP_NAME}" --output json "${PROFILE_ARGS[@]}" 2>/dev/null)"; then
+      return 1
+    fi
+    deploy_state="$(_app_active_deployment_state "${json}")"
+    if [[ -z "${deploy_state}" || "${deploy_state}" == "SUCCEEDED" || "${deploy_state}" == "FAILED" || "${deploy_state}" == "CANCELLED" ]]; then
+      return 0
+    fi
+    echo "  App deployment in progress (active_deployment.status.state=${deploy_state}); waiting ${poll}s…"
+    sleep "${poll}"
+    waited=$((waited + poll))
+  done
+  echo "ERROR: timed out after ${max_wait}s waiting for app deployment to finish." >&2
+  return 1
+}
+
 # ``databricks apps deploy`` requires app_status RUNNING. Handles stopped apps and Ctrl+C
 # during ``apps create`` (partial provisioning).
 ensure_app_running_before_deploy() {
-  local json app_state compute_state
+  local json app_state compute_state app_msg
   if ! json="$(databricks apps get "${APP_NAME}" --output json "${PROFILE_ARGS[@]}" 2>/dev/null)"; then
     return 0
   fi
@@ -107,17 +135,54 @@ ensure_app_running_before_deploy() {
   compute_state="$(
     "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("compute_status") or {}).get("state",""))' <<< "${json}" 2>/dev/null || true
   )"
+  app_msg="$(
+    "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("app_status") or {}).get("message",""))' <<< "${json}" 2>/dev/null || true
+  )"
   if [[ "${app_state}" == "RUNNING" ]]; then
     echo "App '${APP_NAME}' is RUNNING; proceeding to deploy."
     return 0
   fi
+  # After ``apps create``, compute is often ACTIVE while app_status stays UNAVAILABLE until the first
+  # ``apps deploy``. Starting the app in that state kicks off a deployment that races with deploy.
+  if [[ "${app_state}" == "UNAVAILABLE" && "${compute_state}" == "ACTIVE" ]]; then
+    if echo "${app_msg}" | grep -qiE 'not been deployed|deploy(ing)?[[:space:]]+source|run your app by deploying'; then
+      echo "NOTE: App '${APP_NAME}' has no source deployment yet (app_status=UNAVAILABLE, compute_status=ACTIVE)."
+      echo "      Skipping \`databricks apps start\`; the next step (\`databricks apps deploy\`) uploads code and should make the app available."
+      return 0
+    fi
+  fi
   echo "App '${APP_NAME}' is not RUNNING (app_status=${app_state:-unknown}, compute_status=${compute_state:-unknown})."
-  echo "Deploy requires RUNNING; starting app (waits until compute is active)..."
+  echo "Trying \`databricks apps start\` so compute is ready (deploy may still succeed if the platform accepts it)..."
   if [[ "${SKIP_APPS_START_BEFORE_DEPLOY:-}" == "1" ]]; then
     echo "SKIP_APPS_START_BEFORE_DEPLOY=1: skipping databricks apps start; deploy may fail." >&2
     return 0
   fi
   databricks apps start "${APP_NAME}" "${PROFILE_ARGS[@]}"
+  _wait_for_active_deployment_idle || true
+}
+
+_deploy_app() {
+  local deploy_out deploy_rc
+  set +e
+  deploy_out="$(databricks apps deploy "${APP_NAME}" \
+    --source-code-path "${SOURCE_CODE_PATH}" \
+    "${PROFILE_ARGS[@]}" 2>&1)"
+  deploy_rc=$?
+  set -e
+  if [[ "${deploy_rc}" -eq 0 ]]; then
+    return 0
+  fi
+  if echo "${deploy_out}" | grep -qiE 'active deployment in progress|deployment in progress|pending deployment in progress'; then
+    echo "NOTE: ${deploy_out}"
+    echo "Another deployment is already running (often from \`databricks apps start\`). Waiting, then retrying deploy…"
+    _wait_for_active_deployment_idle
+    databricks apps deploy "${APP_NAME}" \
+      --source-code-path "${SOURCE_CODE_PATH}" \
+      "${PROFILE_ARGS[@]}"
+    return $?
+  fi
+  echo "${deploy_out}" >&2
+  return "${deploy_rc}"
 }
 
 mkdir -p "${STATE_DIR}"
@@ -199,9 +264,7 @@ fi
 ensure_app_running_before_deploy
 
 echo "Deploying app '${APP_NAME}' from '${SOURCE_CODE_PATH}'..."
-databricks apps deploy "${APP_NAME}" \
-  --source-code-path "${SOURCE_CODE_PATH}" \
-  "${PROFILE_ARGS[@]}"
+_deploy_app
 
 wait_for_app_running() {
   local json app_state compute_state
