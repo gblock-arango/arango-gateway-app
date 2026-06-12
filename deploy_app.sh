@@ -10,14 +10,19 @@ set -euo pipefail
 #   registry table, warehouse id (see script body for $1..$7). Set ``DATABRICKS_SQL_WAREHOUSE_ID``
 #   or pass warehouse as ``$7`` — no built-in default warehouse id.
 #
+# Local minikube: ``UPDATE_LOCAL_TUNNEL_REGISTRY=true ./deploy_app.sh`` starts cloudflared and
+# upserts the tunnel host into ARANGO_REGISTRY_TABLE. Default is false so redeploy does not
+# overwrite AWS/GCP endpoints set from arango-workflow-app Connection → Connect.
+#
 # On first run, if the Databricks App name does not exist yet, the script runs
 # ``databricks apps create`` before ``databricks apps deploy``.
 #
 # If ``apps create`` was interrupted (Ctrl+C) or the app was stopped, ``apps deploy`` can fail with
-# "not in RUNNING state". The script then runs ``databricks apps start`` and waits.
+# "not in RUNNING state". The script may run ``databricks apps start`` when compute is not ACTIVE.
 #
-# ``apps start`` can kick off a platform deployment that races with ``apps deploy`` ("pending deployment
-# in progress"). The script waits for that deployment to finish and retries deploy automatically.
+# ``ensure_app_running_before_deploy`` skips ``apps start`` when compute is already ACTIVE (see
+# ``../arango-workflow-app/scripts/_databricks_apps_deploy_lib.sh``). ``_deploy_app`` retries on
+# deployment lock errors until idle or timeout.
 #
 # Genie lives on arango-dashboard-app; this script does not create Genie registry tables.
 #
@@ -56,11 +61,14 @@ REGISTRY_TABLE="${6:-workspace.default.arango_connection_registry}"
 WAREHOUSE_ID="${DATABRICKS_SQL_WAREHOUSE_ID:-${7:-}}"
 ARANGO_GATEWAY_REGISTRY_TABLE="${ARANGO_GATEWAY_REGISTRY_TABLE:-workspace.default.arango_gateway_registry}"
 # Unity Catalog volume for gzip JSONL graph snapshots (/Volumes/<cat>/<schema>/<name>/uc_graph_snapshots).
-# Must match app env UC_GRAPH_VOLUME_NAME (default in app.yaml: arango_agent_volume).
-UC_GRAPH_VOLUME_NAME="${UC_GRAPH_VOLUME_NAME:-arango_agent_volume}"
-SECRET_SCOPE="${SECRET_SCOPE:-arango-gateway-app-secrets}"
+UC_GRAPH_SNAPSHOT_VOLUME_NAME="${UC_GRAPH_SNAPSHOT_VOLUME_NAME:-${UC_GRAPH_VOLUME_NAME:-arango_agent_volume}}"
+# Connection profiles + workflow-data (same env name as arango-workflow-app).
+UC_WORKFLOW_VOLUME_NAME="${UC_WORKFLOW_VOLUME_NAME:-arango_workflow_volume}"
+# Local minikube only: cloudflared tunnel + UC registry upsert (default off — preserves AWS/GCP Connect).
+UPDATE_LOCAL_TUNNEL_REGISTRY="${UPDATE_LOCAL_TUNNEL_REGISTRY:-false}"
+# Optional: only for DEBUG_POST_DEPLOY_IMPORT curl to local Arango (not stored in app.yaml).
 ARANGO_PING_BASIC_AUTH_USER="${ARANGO_PING_BASIC_AUTH_USER:-root}"
-ARANGO_PING_BASIC_AUTH_PASSWORD="${ARANGO_PING_BASIC_AUTH_PASSWORD:-8c1bc9344c886819859534a5ac951412c650870662228617cfbb69023489afd2}"
+ARANGO_PING_BASIC_AUTH_PASSWORD="${ARANGO_PING_BASIC_AUTH_PASSWORD:-}"
 if [[ -n "${ARANGO_ROOT_PASSWORD_FILE:-}" && -f "${ARANGO_ROOT_PASSWORD_FILE}" ]]; then
   ARANGO_PING_BASIC_AUTH_PASSWORD="$(head -n 1 "${ARANGO_ROOT_PASSWORD_FILE}" | tr -d '\r\n')"
 fi
@@ -85,9 +93,9 @@ TUNNEL_LOG="${STATE_DIR}/cloudflared.log"
 TUNNEL_PID_FILE="${STATE_DIR}/cloudflared.pid"
 
 if [[ "${DEBUG_POST_DEPLOY_IMPORT}" == "true" || "${DEBUG_POST_DEPLOY_IMPORT}" == "1" ]] &&
-  [[ "${ARANGO_PING_BASIC_AUTH_PASSWORD}" == "replace-with-a-strong-password" ]]; then
+  [[ -z "${ARANGO_PING_BASIC_AUTH_PASSWORD}" ]]; then
   echo "ERROR: DEBUG_POST_DEPLOY_IMPORT will call Arango at ${LOCAL_ARANGO_URL} with basic auth." >&2
-  echo "Set ARANGO_PING_BASIC_AUTH_PASSWORD or ARANGO_ROOT_PASSWORD_FILE (see README)." >&2
+  echo "Set ARANGO_ROOT_PASSWORD_FILE or ARANGO_PING_BASIC_AUTH_PASSWORD for the debug import only." >&2
   exit 1
 fi
 
@@ -97,93 +105,8 @@ else
   PROFILE_ARGS=()
 fi
 
-_app_active_deployment_state() {
-  local json="$1"
-  "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("active_deployment") or {}).get("status",{}).get("state",""))' <<< "${json}" 2>/dev/null || true
-}
-
-_wait_for_active_deployment_idle() {
-  local json deploy_state waited=0
-  local max_wait="${DEPLOY_WAIT_ACTIVE_DEPLOYMENT_SEC:-900}"
-  local poll="${DEPLOY_WAIT_ACTIVE_DEPLOYMENT_POLL_SEC:-10}"
-  while (( waited < max_wait )); do
-    if ! json="$(databricks apps get "${APP_NAME}" --output json "${PROFILE_ARGS[@]}" 2>/dev/null)"; then
-      return 1
-    fi
-    deploy_state="$(_app_active_deployment_state "${json}")"
-    if [[ -z "${deploy_state}" || "${deploy_state}" == "SUCCEEDED" || "${deploy_state}" == "FAILED" || "${deploy_state}" == "CANCELLED" ]]; then
-      return 0
-    fi
-    echo "  App deployment in progress (active_deployment.status.state=${deploy_state}); waiting ${poll}s…"
-    sleep "${poll}"
-    waited=$((waited + poll))
-  done
-  echo "ERROR: timed out after ${max_wait}s waiting for app deployment to finish." >&2
-  return 1
-}
-
-# ``databricks apps deploy`` requires app_status RUNNING. Handles stopped apps and Ctrl+C
-# during ``apps create`` (partial provisioning).
-ensure_app_running_before_deploy() {
-  local json app_state compute_state app_msg
-  if ! json="$(databricks apps get "${APP_NAME}" --output json "${PROFILE_ARGS[@]}" 2>/dev/null)"; then
-    return 0
-  fi
-  app_state="$(
-    "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("app_status") or {}).get("state",""))' <<< "${json}" 2>/dev/null || true
-  )"
-  compute_state="$(
-    "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("compute_status") or {}).get("state",""))' <<< "${json}" 2>/dev/null || true
-  )"
-  app_msg="$(
-    "${PYTHON_BIN}" -c 'import json,sys; d=json.load(sys.stdin); print((d.get("app_status") or {}).get("message",""))' <<< "${json}" 2>/dev/null || true
-  )"
-  if [[ "${app_state}" == "RUNNING" ]]; then
-    echo "App '${APP_NAME}' is RUNNING; proceeding to deploy."
-    return 0
-  fi
-  # After ``apps create``, compute is often ACTIVE while app_status stays UNAVAILABLE until the first
-  # ``apps deploy``. Starting the app in that state kicks off a deployment that races with deploy.
-  if [[ "${app_state}" == "UNAVAILABLE" && "${compute_state}" == "ACTIVE" ]]; then
-    if echo "${app_msg}" | grep -qiE 'not been deployed|deploy(ing)?[[:space:]]+source|run your app by deploying'; then
-      echo "NOTE: App '${APP_NAME}' has no source deployment yet (app_status=UNAVAILABLE, compute_status=ACTIVE)."
-      echo "      Skipping \`databricks apps start\`; the next step (\`databricks apps deploy\`) uploads code and should make the app available."
-      return 0
-    fi
-  fi
-  echo "App '${APP_NAME}' is not RUNNING (app_status=${app_state:-unknown}, compute_status=${compute_state:-unknown})."
-  echo "Trying \`databricks apps start\` so compute is ready (deploy may still succeed if the platform accepts it)..."
-  if [[ "${SKIP_APPS_START_BEFORE_DEPLOY:-}" == "1" ]]; then
-    echo "SKIP_APPS_START_BEFORE_DEPLOY=1: skipping databricks apps start; deploy may fail." >&2
-    return 0
-  fi
-  databricks apps start "${APP_NAME}" "${PROFILE_ARGS[@]}"
-  _wait_for_active_deployment_idle || true
-}
-
-_deploy_app() {
-  local deploy_out deploy_rc
-  set +e
-  deploy_out="$(databricks apps deploy "${APP_NAME}" \
-    --source-code-path "${SOURCE_CODE_PATH}" \
-    "${PROFILE_ARGS[@]}" 2>&1)"
-  deploy_rc=$?
-  set -e
-  if [[ "${deploy_rc}" -eq 0 ]]; then
-    return 0
-  fi
-  if echo "${deploy_out}" | grep -qiE 'active deployment in progress|deployment in progress|pending deployment in progress'; then
-    echo "NOTE: ${deploy_out}"
-    echo "Another deployment is already running (often from \`databricks apps start\`). Waiting, then retrying deploy…"
-    _wait_for_active_deployment_idle
-    databricks apps deploy "${APP_NAME}" \
-      --source-code-path "${SOURCE_CODE_PATH}" \
-      "${PROFILE_ARGS[@]}"
-    return $?
-  fi
-  echo "${deploy_out}" >&2
-  return "${deploy_rc}"
-}
+# shellcheck source=../arango-workflow-app/scripts/_databricks_apps_deploy_lib.sh
+source "${SCRIPT_DIR}/../arango-workflow-app/scripts/_databricks_apps_deploy_lib.sh"
 
 mkdir -p "${STATE_DIR}"
 
@@ -224,32 +147,7 @@ ensure_cloudflared() {
 
 ensure_cloudflared
 
-echo "Ensuring Databricks secret scope '${SECRET_SCOPE}' exists..."
-CREATE_SCOPE_OUTPUT="$(
-  databricks secrets create-scope "${SECRET_SCOPE}" "${PROFILE_ARGS[@]}" 2>&1 || true
-)"
-if [[ -n "${CREATE_SCOPE_OUTPUT}" ]]; then
-  if [[ "${CREATE_SCOPE_OUTPUT}" == *"RESOURCE_ALREADY_EXISTS"* ]] || [[ "${CREATE_SCOPE_OUTPUT}" == *"already exists"* ]]; then
-    echo "Secret scope already exists; continuing."
-  else
-    echo "${CREATE_SCOPE_OUTPUT}" >&2
-    if [[ "${CREATE_SCOPE_OUTPUT}" == *"Error:"* ]]; then
-      exit 1
-    fi
-  fi
-fi
-
-echo "Setting Arango auth secrets in scope '${SECRET_SCOPE}'..."
-databricks secrets put-secret "${SECRET_SCOPE}" ARANGO_PING_BASIC_AUTH_USER \
-  --string-value "${ARANGO_PING_BASIC_AUTH_USER}" \
-  "${PROFILE_ARGS[@]}"
-databricks secrets put-secret "${SECRET_SCOPE}" ARANGO_PING_BASIC_AUTH_PASSWORD \
-  --string-value "${ARANGO_PING_BASIC_AUTH_PASSWORD}" \
-  "${PROFILE_ARGS[@]}"
-
-if [[ "${ARANGO_PING_BASIC_AUTH_PASSWORD}" == "replace-with-a-strong-password" ]]; then
-  echo "WARNING: Using literal placeholder password. Set ARANGO_PING_BASIC_AUTH_PASSWORD or ARANGO_ROOT_PASSWORD_FILE for real auth."
-fi
+echo "Arango credentials: configure in arango-workflow-app Connection page (/connection); gateway reads UC workflow-data."
 
 echo "Syncing local project to '${SOURCE_CODE_PATH}'..."
 databricks sync . "${SOURCE_CODE_PATH}" "${PROFILE_ARGS[@]}"
@@ -329,7 +227,7 @@ if [[ -z "${APP_SERVICE_PRINCIPAL_CLIENT_ID}" ]]; then
 fi
 
 APP_HEALTH_URL="${APP_URL}/health"
-APP_HEALTH_EXTENDED_URL="${APP_URL}/api/workflow/debug/startup-status?refresh=true"
+APP_HEALTH_EXTENDED_URL="${APP_URL}/api/debug/startup-status?refresh=true"
 APP_EMBED_UI_URL="${APP_URL}/embedded-arango/_db/_system/_admin/aardvark/index.html#login"
 
 if [[ -z "${WAREHOUSE_ID// }" ]]; then
@@ -420,9 +318,13 @@ run_sql_statement "GRANT MODIFY ON TABLE ${ARANGO_GATEWAY_REGISTRY_TABLE} TO \`$
 
 REGISTRY_CATALOG="$(echo "${REGISTRY_TABLE}" | cut -d. -f1)"
 REGISTRY_SCHEMA="$(echo "${REGISTRY_TABLE}" | cut -d. -f2)"
-echo "Ensuring UC graph snapshot volume ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_VOLUME_NAME} (JSONL export path under /Volumes/...)..."
-run_sql_statement "CREATE VOLUME IF NOT EXISTS ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_VOLUME_NAME}"
-run_sql_statement "GRANT READ VOLUME, WRITE VOLUME ON VOLUME ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_VOLUME_NAME} TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
+echo "Ensuring UC graph snapshot volume ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_SNAPSHOT_VOLUME_NAME} (JSONL export path under /Volumes/...)..."
+run_sql_statement "CREATE VOLUME IF NOT EXISTS ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_SNAPSHOT_VOLUME_NAME}"
+run_sql_statement "GRANT READ VOLUME, WRITE VOLUME ON VOLUME ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_SNAPSHOT_VOLUME_NAME} TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
+
+echo "Granting READ on workflow-data volume ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_WORKFLOW_VOLUME_NAME} (Connection profiles from arango-workflow-app)..."
+run_sql_statement "CREATE VOLUME IF NOT EXISTS ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_WORKFLOW_VOLUME_NAME}"
+run_sql_statement "GRANT READ VOLUME ON VOLUME ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_WORKFLOW_VOLUME_NAME} TO \`${APP_SERVICE_PRINCIPAL_CLIENT_ID}\`"
 
 echo
 echo "Publishing gateway app URL to Unity Catalog (${ARANGO_GATEWAY_REGISTRY_TABLE})..."
@@ -444,44 +346,50 @@ if [[ "${_publish_gw_uc_ok}" -ne 1 ]]; then
   echo "NOTE: Gateway URL UC publish failed (often table owned by app SP without broad grants yet). Restart arango-gateway-app once, then re-run ./deploy_app.sh or run update_arango_gateway_registry_uc.sh manually." >&2
 fi
 
-if [[ -f "${TUNNEL_PID_FILE}" ]]; then
-  OLD_PID="$(cat "${TUNNEL_PID_FILE}" 2>/dev/null || true)"
-  if [[ -n "${OLD_PID}" ]] && kill -0 "${OLD_PID}" 2>/dev/null; then
-    echo "Stopping existing cloudflared process (${OLD_PID})..."
-    kill "${OLD_PID}" || true
+if [[ "${UPDATE_LOCAL_TUNNEL_REGISTRY}" == "true" || "${UPDATE_LOCAL_TUNNEL_REGISTRY}" == "1" ]]; then
+  if [[ -f "${TUNNEL_PID_FILE}" ]]; then
+    OLD_PID="$(cat "${TUNNEL_PID_FILE}" 2>/dev/null || true)"
+    if [[ -n "${OLD_PID}" ]] && kill -0 "${OLD_PID}" 2>/dev/null; then
+      echo "Stopping existing cloudflared process (${OLD_PID})..."
+      kill "${OLD_PID}" || true
+      sleep 1
+    fi
+  fi
+
+  echo "Starting cloudflared in background for ${LOCAL_ARANGO_URL}..."
+  nohup cloudflared tunnel \
+    --url "${LOCAL_ARANGO_URL}" \
+    --no-tls-verify \
+    > "${TUNNEL_LOG}" 2>&1 &
+  TUNNEL_PID=$!
+  echo "${TUNNEL_PID}" > "${TUNNEL_PID_FILE}"
+
+  TUNNEL_URL=""
+  for _ in $(seq 1 30); do
+    if [[ -f "${TUNNEL_LOG}" ]]; then
+      TUNNEL_URL="$("${PYTHON_BIN}" -c 'import re,sys; t=open(sys.argv[1], "r", encoding="utf-8", errors="ignore").read(); m=re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", t); print(m.group(0) if m else "")' "${TUNNEL_LOG}")"
+    fi
+    if [[ -n "${TUNNEL_URL}" ]]; then
+      break
+    fi
     sleep 1
-  fi
-fi
+  done
 
-echo "Starting cloudflared in background for ${LOCAL_ARANGO_URL}..."
-nohup cloudflared tunnel \
-  --url "${LOCAL_ARANGO_URL}" \
-  --no-tls-verify \
-  > "${TUNNEL_LOG}" 2>&1 &
-TUNNEL_PID=$!
-echo "${TUNNEL_PID}" > "${TUNNEL_PID_FILE}"
-
-TUNNEL_URL=""
-for _ in $(seq 1 30); do
-  if [[ -f "${TUNNEL_LOG}" ]]; then
-    TUNNEL_URL="$("${PYTHON_BIN}" -c 'import re,sys; t=open(sys.argv[1], "r", encoding="utf-8", errors="ignore").read(); m=re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", t); print(m.group(0) if m else "")' "${TUNNEL_LOG}")"
-  fi
   if [[ -n "${TUNNEL_URL}" ]]; then
-    break
-  fi
-  sleep 1
-done
-
-if [[ -n "${TUNNEL_URL}" ]]; then
-  echo
-  echo "Updating Unity Catalog registry via Databricks SQL..."
-  if [[ -n "${PROFILE}" ]]; then
-    "${SCRIPT_DIR}/update_arango_registry_uc.sh" "${TUNNEL_URL}" "${CLUSTER_NAME}" "${REGISTRY_TABLE}" "${WAREHOUSE_ID}" "${PROFILE}"
+    echo
+    echo "Updating Unity Catalog registry via Databricks SQL..."
+    if [[ -n "${PROFILE}" ]]; then
+      "${SCRIPT_DIR}/update_arango_registry_uc.sh" "${TUNNEL_URL}" "${CLUSTER_NAME}" "${REGISTRY_TABLE}" "${WAREHOUSE_ID}" "${PROFILE}"
+    else
+      "${SCRIPT_DIR}/update_arango_registry_uc.sh" "${TUNNEL_URL}" "${CLUSTER_NAME}" "${REGISTRY_TABLE}" "${WAREHOUSE_ID}"
+    fi
   else
-    "${SCRIPT_DIR}/update_arango_registry_uc.sh" "${TUNNEL_URL}" "${CLUSTER_NAME}" "${REGISTRY_TABLE}" "${WAREHOUSE_ID}"
+    echo "Skipping Unity Catalog registry update because tunnel URL was not detected."
   fi
 else
-  echo "Skipping Unity Catalog registry update because tunnel URL was not detected."
+  echo "Skipping cloudflared and local tunnel registry update (set UPDATE_LOCAL_TUNNEL_REGISTRY=true for minikube dev)."
+  TUNNEL_URL=""
+  TUNNEL_PID=""
 fi
 
 if [[ "${DEBUG_POST_DEPLOY_IMPORT}" == "true" || "${DEBUG_POST_DEPLOY_IMPORT}" == "1" ]]; then
@@ -519,10 +427,13 @@ if [[ -n "${APP_RESOURCE_ID}" ]]; then
 fi
 if [[ -n "${TUNNEL_URL}" ]]; then
   echo "ARANGO_TUNNEL_URL=${TUNNEL_URL}"
-else
+  echo "CLOUDFLARED_PID=${TUNNEL_PID}"
+elif [[ "${UPDATE_LOCAL_TUNNEL_REGISTRY}" == "true" || "${UPDATE_LOCAL_TUNNEL_REGISTRY}" == "1" ]]; then
   echo "WARNING: tunnel URL not detected yet. Check ${TUNNEL_LOG}"
+  echo "CLOUDFLARED_PID=${TUNNEL_PID}"
+else
+  echo "Local tunnel registry update skipped (UPDATE_LOCAL_TUNNEL_REGISTRY=false)."
 fi
-echo "CLOUDFLARED_PID=${TUNNEL_PID}"
 echo
 echo "To export in your current shell:"
 echo "export DATABRICKS_APP_URL=\"${APP_URL}\""
@@ -537,8 +448,9 @@ fi
 echo
 echo "cloudflared log: ${TUNNEL_LOG}"
 echo "cloudflared pid file: ${TUNNEL_PID_FILE}"
-echo "secret scope: ${SECRET_SCOPE}"
-echo "secret keys: ARANGO_PING_BASIC_AUTH_USER, ARANGO_PING_BASIC_AUTH_PASSWORD"
 echo "registry table: ${REGISTRY_TABLE}"
-echo "uc graph snapshot volume: ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_VOLUME_NAME}"
+echo "uc graph snapshot volume: ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_GRAPH_SNAPSHOT_VOLUME_NAME}"
+echo "uc workflow volume: ${REGISTRY_CATALOG}.${REGISTRY_SCHEMA}.${UC_WORKFLOW_VOLUME_NAME} (READ — Connection profile auth)"
 echo "warehouse id: ${WAREHOUSE_ID}"
+echo "Gateway reads active profile credentials from workflow-data/settings/arango_connection_profiles.json (10s in-process cache; registry table has host/port only)."
+echo "Registry row cached for \${ARANGO_REGISTRY_CACHE_TTL_SECONDS:-60}s per proxy worker (set ARANGO_REGISTRY_CACHE_TTL_SECONDS=0 to disable)."

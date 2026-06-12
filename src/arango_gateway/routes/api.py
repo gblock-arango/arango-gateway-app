@@ -16,6 +16,7 @@ from arango_gateway.services.arango_registry import (
     upsert_registry_entry,
 )
 from arango_gateway.services.arango_http import arango_json_request, ping_arango_endpoint
+from arango_gateway.services.arango_http_batch import execute_arango_http_batch
 from arango_gateway.services.arango_proxy_path import arango_http_proxy_path_allowed
 from arango_gateway.services.arango_uc_graph_import import (
     import_uc_graph_to_arango,
@@ -36,6 +37,7 @@ from arango_gateway.services.uc_graph_jsonl_bundle import (
     resolve_run_id,
 )
 from arango_gateway.services.arango_conversation import ask_arango_conversation
+from arango_gateway.services.arango_basic_auth import resolve_arango_basic_auth
 
 api_blueprint = Blueprint("api", __name__)
 
@@ -43,6 +45,11 @@ _ARANGO_HTTP_PROXY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"}
 
 # Temp uploads for "Add Your Documents" until UC volume / ML pipeline wiring exists.
 _DATABRICKS_GRAPH_UPLOAD_SUBDIR = "arango_dashboard_uploads"
+
+
+def _arango_basic_auth() -> tuple[str, str]:
+    user, password, _meta = resolve_arango_basic_auth(current_app.config)
+    return user, password
 
 
 def _ensure_registry_if_configured(table_name: str, warehouse_id: str) -> None:
@@ -61,7 +68,11 @@ def _looks_like_missing_uc_volume(message: str) -> bool:
 def _uc_volume_create_sql_hint() -> str:
     """One-line SQL to create the configured UC volume (catalog.schema from registry table)."""
     table = str(current_app.config.get("ARANGO_REGISTRY_TABLE") or "").strip()
-    vol = str(current_app.config.get("UC_GRAPH_VOLUME_NAME") or "").strip()
+    vol = str(
+        current_app.config.get("UC_GRAPH_SNAPSHOT_VOLUME_NAME")
+        or current_app.config.get("UC_GRAPH_VOLUME_NAME")
+        or ""
+    ).strip()
     if not vol:
         vol = "arango_agent_volume"
     parts = table.split(".")
@@ -178,8 +189,7 @@ def _run_arango_import(
             "skipped": True,
             "reason": "no_active_registry_row_or_invalid_endpoint",
         }
-    auth_user = (current_app.config.get("ARANGO_PING_BASIC_AUTH_USER") or "").strip()
-    auth_password = current_app.config.get("ARANGO_PING_BASIC_AUTH_PASSWORD")
+    auth_user, auth_password = _arango_basic_auth()
     verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
     db = str(current_app.config.get("ARANGO_DATABASE") or "_system").strip() or "_system"
     batch = int(current_app.config.get("ARANGO_UC_IMPORT_BATCH_SIZE") or 300)
@@ -243,8 +253,7 @@ def _iter_extract_schema_ndjson(payload: dict):
         yield json.dumps({"event": "done", "result": result})
         return
 
-    auth_user = (current_app.config.get("ARANGO_PING_BASIC_AUTH_USER") or "").strip()
-    auth_password = current_app.config.get("ARANGO_PING_BASIC_AUTH_PASSWORD")
+    auth_user, auth_password = _arango_basic_auth()
     verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
     db = str(current_app.config.get("ARANGO_DATABASE") or "_system").strip() or "_system"
     batch = int(current_app.config.get("ARANGO_UC_IMPORT_BATCH_SIZE") or 300)
@@ -436,8 +445,7 @@ def ping_arango_from_registry():
                 }
             ), 404
 
-        auth_user = (current_app.config.get("ARANGO_PING_BASIC_AUTH_USER") or "").strip()
-        auth_password = current_app.config.get("ARANGO_PING_BASIC_AUTH_PASSWORD")
+        auth_user, auth_password = _arango_basic_auth()
         verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
 
         probe = ping_arango_endpoint(
@@ -523,8 +531,7 @@ def arango_http_proxy():
         if not base:
             return jsonify({"ok": False, "error": "invalid registry coordinates"}), 500
 
-        auth_user = (current_app.config.get("ARANGO_PING_BASIC_AUTH_USER") or "").strip()
-        auth_password = current_app.config.get("ARANGO_PING_BASIC_AUTH_PASSWORD")
+        auth_user, auth_password = _arango_basic_auth()
         verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
 
         result = arango_json_request(
@@ -538,6 +545,87 @@ def arango_http_proxy():
             timeout_seconds=timeout_seconds,
         )
         return jsonify(result)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "body": {}}), 500
+
+
+@api_blueprint.post("/arango/http/batch")
+def arango_http_proxy_batch():
+    """Run many Arango REST calls with one UC registry lookup (schema bootstrap).
+
+    Body::
+
+        {
+          "requests": [
+            {"method": "POST", "path": "/_db/mydb/_api/collection", "body": {"name": "documents", "type": 2}},
+            ...
+          ],
+          "parallel": true,
+          "max_workers": 8,
+          "stop_on_error": false
+        }
+    """
+    payload = request.get_json(silent=True) or {}
+    raw_requests = payload.get("requests")
+    if not isinstance(raw_requests, list):
+        return jsonify({"ok": False, "error": "requests must be a JSON array"}), 400
+
+    table_name = current_app.config["ARANGO_REGISTRY_TABLE"]
+    warehouse_id = current_app.config["DATABRICKS_SQL_WAREHOUSE_ID"]
+    timeout_seconds = float(
+        current_app.config.get("ARANGO_HTTP_PROXY_TIMEOUT_SECONDS", 120.0)
+    )
+    allow_admin = bool(current_app.config.get("ARANGO_HTTP_PROXY_ALLOW_ADMIN", False))
+    parallel = str(payload.get("parallel", True)).strip().lower() not in ("0", "false", "no")
+    try:
+        max_workers = int(payload.get("max_workers", 8))
+    except (TypeError, ValueError):
+        max_workers = 8
+    stop_on_error = str(payload.get("stop_on_error", False)).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+    try:
+        _ensure_registry_if_configured(table_name=table_name, warehouse_id=warehouse_id)
+        row = get_active_registry_row(table_name=table_name, warehouse_id=warehouse_id)
+        if not row:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": "No active Arango registry row found.",
+                    "table": table_name,
+                }
+            ), 404
+
+        base = build_arango_web_ui_base_url(
+            str(row.get("protocol", "")),
+            str(row.get("ip_address", "")),
+            row.get("port", ""),
+        )
+        if not base:
+            return jsonify({"ok": False, "error": "invalid registry coordinates"}), 500
+
+        auth_user, auth_password = _arango_basic_auth()
+        verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
+
+        result = execute_arango_http_batch(
+            base_url=base,
+            requests=raw_requests,
+            basic_auth_user=auth_user or None,
+            basic_auth_password=auth_password if auth_user else None,
+            verify_tls=verify_tls,
+            timeout_seconds=timeout_seconds,
+            allow_admin=allow_admin,
+            parallel=parallel,
+            max_workers=max_workers,
+            stop_on_error=stop_on_error,
+        )
+        status = 200 if result.get("ok") else 502
+        return jsonify(result), status
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc), "body": {}}), 500
 

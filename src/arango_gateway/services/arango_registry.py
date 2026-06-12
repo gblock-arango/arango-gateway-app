@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -10,6 +12,17 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from .databricks_sql import execute_sql
 
 logger = logging.getLogger(__name__)
+
+# Cache active registry row — arango_http_proxy previously ran UC SQL on every hop.
+_REGISTRY_CACHE_TTL_SEC = float(os.environ.get("ARANGO_REGISTRY_CACHE_TTL_SECONDS", "60"))
+_registry_cache: dict[str, object] = {"at": 0.0, "key": "", "row": None}
+
+
+def invalidate_active_registry_cache() -> None:
+    """Force the next lookup to re-query UC (Connect / registry upsert)."""
+    _registry_cache["at"] = 0.0
+    _registry_cache["key"] = ""
+    _registry_cache["row"] = None
 
 # Web UI entry (Aardvark). Iframe must target this path, not the server root.
 ARANGO_AARDVARK_PATH = "/_db/_system/_admin/aardvark/index.html"
@@ -220,7 +233,7 @@ def inject_url_basic_auth(url: str, user: str, password: str) -> str:
 
     Do **not** use this for ``iframe src`` — Chromium blocks credential URLs in
     embedded frames (blank / black iframe). Use for top-level ``target=_blank``
-    links only. Same secrets as ``ARANGO_PING_BASIC_AUTH_*``; appears in HTML.
+    links only. Credentials come from arango-workflow-app Connection profiles on UC volume.
     """
     user = (user or "").strip()
     if not user:
@@ -267,15 +280,40 @@ def get_active_registry_row(table_name: str, warehouse_id: str) -> dict | None:
 
     Relies on ``get_active_registry_entry`` (SQL ``WHERE is_active IS TRUE``) and
     double-checks the payload so an inactive row is never returned.
+
+    Results are cached briefly (``ARANGO_REGISTRY_CACHE_TTL_SECONDS``, default 60s)
+    so high-volume ``/api/arango/http`` proxy traffic does not re-query the SQL
+    warehouse on every Arango REST hop.
     """
+    cache_key = f"{table_name}|{warehouse_id}"
+    now = time.monotonic()
+    cache_at = float(_registry_cache.get("at") or 0.0)
+    if (
+        cache_at
+        and now - cache_at < _REGISTRY_CACHE_TTL_SEC
+        and _registry_cache.get("key") == cache_key
+    ):
+        cached = _registry_cache.get("row")
+        if isinstance(cached, dict):
+            return dict(cached)
+
     result = get_active_registry_entry(table_name=table_name, warehouse_id=warehouse_id)
     rows = result.get("rows", [])
     if not rows:
+        _registry_cache["at"] = now
+        _registry_cache["key"] = cache_key
+        _registry_cache["row"] = None
         return None
     row = rows[0]
     if not _registry_row_is_active(row):
+        _registry_cache["at"] = now
+        _registry_cache["key"] = cache_key
+        _registry_cache["row"] = None
         return None
-    return row
+    _registry_cache["at"] = now
+    _registry_cache["key"] = cache_key
+    _registry_cache["row"] = dict(row)
+    return dict(row)
 
 
 def upsert_registry_entry(
@@ -312,3 +350,4 @@ def upsert_registry_entry(
         """,
         warehouse_id=warehouse_id,
     )
+    invalidate_active_registry_cache()

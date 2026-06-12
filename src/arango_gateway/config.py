@@ -6,15 +6,30 @@ from dataclasses import dataclass, field
 # ``DATABRICKS_SQL_WAREHOUSE_ID`` has no code default — set via env, ``app.yaml``, or parent bundle.
 _DEFAULT_ARANGO_REGISTRY_TABLE = "workspace.default.arango_connection_registry"
 _DEFAULT_ARANGO_GATEWAY_REGISTRY_TABLE = "workspace.default.arango_gateway_registry"
-_DEFAULT_ARANGO_PING_BASIC_AUTH_PASSWORD = (
-    "8c1bc9344c886819859534a5ac951412c650870662228617cfbb69023489afd2"
-)
+_DEFAULT_UC_WORKFLOW_VOLUME_NAME = "arango_workflow_volume"
+_DEFAULT_UC_GRAPH_SNAPSHOT_VOLUME_NAME = "arango_agent_volume"
 
 
-def _uc_graph_volume_name_from_env() -> str:
-    """Volume name segment under /Volumes/<catalog>/<schema>/ (see ``UC_GRAPH_VOLUME_NAME``)."""
-    v = (os.environ.get("UC_GRAPH_VOLUME_NAME") or "arango_agent_volume").strip()
-    return v if v else "arango_agent_volume"
+def _uc_workflow_volume_name_from_env() -> str:
+    """Shared with arango-workflow-app (workflow-data, Connection profiles)."""
+    explicit = (os.environ.get("UC_WORKFLOW_VOLUME_NAME") or "").strip()
+    if explicit:
+        return explicit
+    legacy = (os.environ.get("UC_GRAPH_VOLUME_NAME") or "").strip()
+    if legacy and legacy != _DEFAULT_UC_GRAPH_SNAPSHOT_VOLUME_NAME:
+        return legacy
+    return _DEFAULT_UC_WORKFLOW_VOLUME_NAME
+
+
+def _uc_graph_snapshot_volume_name_from_env() -> str:
+    """JSONL graph export volume (not workflow-data)."""
+    explicit = (os.environ.get("UC_GRAPH_SNAPSHOT_VOLUME_NAME") or "").strip()
+    if explicit:
+        return explicit
+    legacy = (os.environ.get("UC_GRAPH_VOLUME_NAME") or "").strip()
+    if legacy:
+        return legacy
+    return _DEFAULT_UC_GRAPH_SNAPSHOT_VOLUME_NAME
 
 
 def _uc_graph_snapshot_base() -> str:
@@ -23,12 +38,7 @@ def _uc_graph_snapshot_base() -> str:
 
     If ``UC_GRAPH_SNAPSHOT_BASE`` is present in the environment, its value is used (empty
     means no default export path). Otherwise derives
-    ``/Volumes/<catalog>/<schema>/<UC_GRAPH_VOLUME_NAME>/uc_graph_snapshots`` from
-    ``ARANGO_REGISTRY_TABLE`` and ``UC_GRAPH_VOLUME_NAME``. If the table name is missing
-    or not ``catalog.schema.table``, returns ``""``.
-
-    Databricks Apps should set ``ARANGO_REGISTRY_TABLE`` and create the UC volume once
-    (see ``app.yaml``). Override the full path with ``UC_GRAPH_SNAPSHOT_BASE`` if needed.
+    ``/Volumes/<catalog>/<schema>/<UC_GRAPH_SNAPSHOT_VOLUME_NAME>/uc_graph_snapshots``.
     """
     if "UC_GRAPH_SNAPSHOT_BASE" in os.environ:
         return os.environ.get("UC_GRAPH_SNAPSHOT_BASE", "").strip()
@@ -36,7 +46,7 @@ def _uc_graph_snapshot_base() -> str:
     parts = table.split(".")
     if len(parts) >= 3:
         catalog, schema = parts[0], parts[1]
-        vol = _uc_graph_volume_name_from_env()
+        vol = _uc_graph_snapshot_volume_name_from_env()
         return f"/Volumes/{catalog}/{schema}/{vol}/uc_graph_snapshots"
     return ""
 
@@ -75,14 +85,12 @@ class AppConfig:
     ARANGO_PING_TIMEOUT_SECONDS: float = field(
         default_factory=lambda: float(os.environ.get("ARANGO_PING_TIMEOUT_SECONDS", "5"))
     )
+    # Legacy optional override only — primary source is arango-workflow-app Connection UI on UC volume.
     ARANGO_PING_BASIC_AUTH_USER: str = field(
-        default_factory=lambda: os.environ.get("ARANGO_PING_BASIC_AUTH_USER", "")
+        default_factory=lambda: (os.environ.get("ARANGO_PING_BASIC_AUTH_USER", "") or "").strip()
     )
     ARANGO_PING_BASIC_AUTH_PASSWORD: str = field(
-        default_factory=lambda: (
-            (os.environ.get("ARANGO_PING_BASIC_AUTH_PASSWORD", "") or "").strip()
-            or _DEFAULT_ARANGO_PING_BASIC_AUTH_PASSWORD
-        )
+        default_factory=lambda: (os.environ.get("ARANGO_PING_BASIC_AUTH_PASSWORD", "") or "").strip()
     )
     ARANGO_PING_TLS_VERIFY: bool = field(
         default_factory=lambda: os.environ.get("ARANGO_PING_TLS_VERIFY", "true").lower()
@@ -115,9 +123,21 @@ class AppConfig:
         ).lower()
         == "true"
     )
-    UC_GRAPH_VOLUME_NAME: str = field(
-        default_factory=_uc_graph_volume_name_from_env
+    UC_WORKFLOW_VOLUME_NAME: str = field(default_factory=_uc_workflow_volume_name_from_env)
+    UC_WORKFLOW_DATA_SUBDIR: str = field(
+        default_factory=lambda: (
+            (os.environ.get("UC_WORKFLOW_DATA_SUBDIR", "") or "workflow-data").strip()
+            or "workflow-data"
+        )
     )
+    UC_WORKFLOW_DATA_IO_MODE: str = field(
+        default_factory=lambda: (os.environ.get("UC_WORKFLOW_DATA_IO_MODE", "auto") or "auto").strip()
+    )
+    UC_GRAPH_SNAPSHOT_VOLUME_NAME: str = field(
+        default_factory=_uc_graph_snapshot_volume_name_from_env
+    )
+    # Deprecated alias — same as UC_GRAPH_SNAPSHOT_VOLUME_NAME (bundle / old app.yaml).
+    UC_GRAPH_VOLUME_NAME: str = field(default_factory=_uc_graph_snapshot_volume_name_from_env)
     UC_GRAPH_SNAPSHOT_BASE: str = field(
         default_factory=_uc_graph_snapshot_base
     )

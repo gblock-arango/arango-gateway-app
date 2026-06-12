@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import requests
 from flask import Blueprint, Response, current_app, redirect, request
 
-from arango_gateway.config import _DEFAULT_ARANGO_PING_BASIC_AUTH_PASSWORD
+from arango_gateway.services.arango_basic_auth import resolve_arango_basic_auth
 from arango_gateway.services.arango_registry import resolve_arango_http_origin
 
 HOP_BY_HOP = frozenset(
@@ -204,12 +204,9 @@ def _rewrite_location(loc: str, origin: str) -> str:
 
 
 def _embed_basic_credentials() -> tuple[str, str]:
-    user = (current_app.config.get("ARANGO_PING_BASIC_AUTH_USER") or "").strip() or "root"
-    pw_raw = current_app.config.get("ARANGO_PING_BASIC_AUTH_PASSWORD")
-    if pw_raw is None or str(pw_raw).strip() == "":
-        password = _DEFAULT_ARANGO_PING_BASIC_AUTH_PASSWORD
-    else:
-        password = str(pw_raw)
+    user, password, _meta = resolve_arango_basic_auth(current_app.config)
+    if not user:
+        return "", ""
     return user, password
 
 

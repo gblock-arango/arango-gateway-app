@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from urllib import error, request
 
 from arango_gateway.services.arango_http import ping_arango_endpoint
+from arango_gateway.services.arango_basic_auth import resolve_arango_basic_auth
 from arango_gateway.services.arango_registry import (
     ensure_registry_table,
     get_active_registry_row,
@@ -35,18 +36,14 @@ def run_startup_debug_check(app) -> dict:
     table_name = app.config["ARANGO_REGISTRY_TABLE"]
     warehouse_id = app.config["DATABRICKS_SQL_WAREHOUSE_ID"]
     timeout_seconds = float(app.config.get("ARANGO_PING_TIMEOUT_SECONDS", 5.0))
-    auth_user = (app.config.get("ARANGO_PING_BASIC_AUTH_USER") or "").strip()
-    auth_password = app.config.get("ARANGO_PING_BASIC_AUTH_PASSWORD")
+    auth_user, auth_password, auth_meta = resolve_arango_basic_auth(app.config)
     verify_tls = bool(app.config.get("ARANGO_PING_TLS_VERIFY", True))
 
     status = {
         "checked_at": _now_utc(),
         "registry_table": table_name,
         "warehouse_id_present": bool(warehouse_id),
-        "secrets": {
-            "auth_user_present": bool(auth_user),
-            "auth_password_present": bool(auth_password),
-        },
+        "secrets": auth_meta,
         "registry": {"status": "unknown"},
         "probe": {"status": "skipped"},
     }

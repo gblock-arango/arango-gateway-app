@@ -10,7 +10,8 @@ command:
 #
 # This app publishes its public base URL to ``ARANGO_GATEWAY_REGISTRY_TABLE`` (read by arango-dashboard-app
 # and arango-mcp-app). Arango connection coordinates are stored in ``ARANGO_REGISTRY_TABLE``; graph
-# JSONL exports use ``UC_GRAPH_VOLUME_NAME`` / ``UC_GRAPH_SNAPSHOT_BASE``.
+# JSONL exports use ``UC_GRAPH_SNAPSHOT_VOLUME_NAME`` / ``UC_GRAPH_SNAPSHOT_BASE``.
+# Connection profiles + workflow-data use ``UC_WORKFLOW_VOLUME_NAME`` (same as arango-workflow-app).
 
 env:
   # ---------------------------------------------------------------------------
@@ -22,26 +23,34 @@ env:
       gateway URL registry). Replace the placeholder with your warehouse id if this file is copied
       into a new workspace.
     value: "473d40703241ee4c"
-  - name: ARANGO_PING_BASIC_AUTH_USER
-    description: "Optional user for Arango ping and embed proxy"
-    value: "root"
-  - name: ARANGO_PING_BASIC_AUTH_PASSWORD
-    description: "Arango basic-auth password (dev default matches single-node-arango-on-minikube; override in production)"
-    value: "8c1bc9344c886819859534a5ac951412c650870662228617cfbb69023489afd2"
-    
+
   # ---------------------------------------------------------------------------
   # OPTIONAL — defaults below; UC / runtime fills many empty URL fields
   # ---------------------------------------------------------------------------
 
-  # --- UC connection registry & graph volume ---
+  # --- UC volumes (shared names with arango-workflow-app) ---
+  # Connection profiles, uploads, builtin datasets:
+  - name: UC_WORKFLOW_VOLUME_NAME
+    description: >-
+      UC volume for workflow-data (Connection profiles, document uploads). Same variable and
+      default as arango-workflow-app.
+    value: "arango_workflow_volume"
+  - name: UC_WORKFLOW_DATA_SUBDIR
+    description: "Subdirectory on UC_WORKFLOW_VOLUME_NAME (workflow-data)"
+    value: "workflow-data"
+  - name: UC_WORKFLOW_DATA_IO_MODE
+    description: "UC read mode for Connection profiles: auto (Files API on Apps), files_api, or local_mount"
+    value: "auto"
   - name: ARANGO_REGISTRY_TABLE
-    description: "Unity Catalog table storing Arango connection coordinates (catalog.schema.table); with UC_GRAPH_VOLUME_NAME drives default UC_GRAPH_SNAPSHOT_BASE when UC_GRAPH_SNAPSHOT_BASE is unset"
+    description: "Unity Catalog table storing Arango connection coordinates (catalog.schema.table)"
     value: "workspace.default.arango_connection_registry"
-  - name: UC_GRAPH_VOLUME_NAME
-    description: "UC volume name under /Volumes/<catalog>/<schema>/ (catalog.schema from ARANGO_REGISTRY_TABLE)"
+  # Gateway UC graph JSONL exports (dashboard extract-schema):
+  - name: UC_GRAPH_SNAPSHOT_VOLUME_NAME
+    description: >-
+      UC volume for gzip JSONL graph snapshots under uc_graph_snapshots/. Not the workflow-data volume.
     value: "arango_agent_volume"
   - name: UC_GRAPH_SNAPSHOT_BASE
-    description: "Optional JSONL export base path; empty derives from ARANGO_REGISTRY_TABLE + UC_GRAPH_VOLUME_NAME"
+    description: "Optional full JSONL export path; empty derives from ARANGO_REGISTRY_TABLE + UC_GRAPH_SNAPSHOT_VOLUME_NAME"
     value: ""
   - name: ARANGO_REGISTRY_AUTO_CREATE
     description: "If true, app creates schema/table on first registry call"
