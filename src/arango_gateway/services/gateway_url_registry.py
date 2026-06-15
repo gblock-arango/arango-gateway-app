@@ -175,6 +175,11 @@ def resolve_self_app_base_url() -> str | None:
 
 def publish_self_gateway_url_to_uc_if_configured(app) -> None:
     """On gateway startup, upsert our public URL into UC for consumers (e.g. dashboard)."""
+    from arango_gateway.deployment_profile import should_publish_peer_url_to_uc
+
+    if not should_publish_peer_url_to_uc():
+        logger.info("Skipping gateway URL UC publish (local_dev)")
+        return
     if not app.config.get("ARANGO_GATEWAY_REGISTRY_AUTO_CREATE", True):
         return
     table = str(app.config.get("ARANGO_GATEWAY_REGISTRY_TABLE") or "").strip()

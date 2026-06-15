@@ -285,6 +285,11 @@ def get_active_registry_row(table_name: str, warehouse_id: str) -> dict | None:
     so high-volume ``/api/arango/http`` proxy traffic does not re-query the SQL
     warehouse on every Arango REST hop.
     """
+    from arango_gateway.deployment_profile import is_local_dev, static_arango_registry_row
+
+    if is_local_dev():
+        return dict(static_arango_registry_row())
+
     cache_key = f"{table_name}|{warehouse_id}"
     now = time.monotonic()
     cache_at = float(_registry_cache.get("at") or 0.0)

@@ -1,7 +1,7 @@
 command:
   - "bash"
   - "-lc"
-  - "export PYTHONPATH=src && gunicorn wsgi:app --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} --workers 4 --timeout 660"
+  - "export PYTHONPATH=src && bash scripts/start-app.sh"
 
 # ``DATABRICKS_SQL_WAREHOUSE_ID``: set here for solo ``databricks apps deploy`` / ``./deploy_app.sh``,
 # or override from **arango-platform-bundle** ``resources/apps.yml`` (``${var.sql_warehouse_id}``).
@@ -17,6 +17,11 @@ env:
   # ---------------------------------------------------------------------------
   # REQUIRED — set (or confirm) for your workspace / bundle
   # ---------------------------------------------------------------------------
+  - name: TEST_DEPLOYMENT_MODE
+    description: >-
+      local_dev = laptop (localhost :8001, Minikube Arango, shared workflow-data).
+      self_managed_platform = Databricks Apps deploy.
+    value: "local_dev"
   - name: DATABRICKS_SQL_WAREHOUSE_ID
     description: >-
       (Required) SQL warehouse id (hex) for Unity Catalog SQL (connection registry, graph metadata,
@@ -69,8 +74,8 @@ env:
     description: "Timeout in seconds for outbound Arango connectivity probe"
     value: "5"
   - name: ARANGO_PING_TLS_VERIFY
-    description: "If false, skip TLS certificate verification (dev only)"
-    value: "true"
+    description: "If false, skip TLS certificate verification (dev only; local_dev forces false)"
+    value: "false"
   - name: ARANGO_DATABASE
     description: "ArangoDB database name for UC graph bulk load"
     value: "_system"

@@ -54,6 +54,11 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.config.from_object(AppConfig())
 
+    from arango_gateway.deployment_profile import arango_ping_tls_verify_default, is_local_dev
+
+    if is_local_dev():
+        app.config["ARANGO_PING_TLS_VERIFY"] = arango_ping_tls_verify_default()
+
     @app.route("/health")
     def health_root():
         return jsonify({"status": "ok"})

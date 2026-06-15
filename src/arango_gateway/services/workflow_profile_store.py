@@ -37,6 +37,10 @@ def uc_workflow_volume_name() -> str:
 
 
 def workflow_data_root() -> Path:
+    from arango_gateway.deployment_profile import is_local_dev, local_workflow_data_root
+
+    if is_local_dev():
+        return local_workflow_data_root()
     catalog, schema = _registry_catalog_schema()
     vol = uc_workflow_volume_name()
     return Path(f"/Volumes/{catalog}/{schema}/{vol}") / _workflow_data_subdir()
@@ -51,6 +55,10 @@ def local_mount_available() -> bool:
 
 
 def use_files_api_for_io() -> bool:
+    from arango_gateway.deployment_profile import should_use_uc_files_api_for_workflow_data
+
+    if not should_use_uc_files_api_for_workflow_data():
+        return False
     mode = (os.environ.get("UC_WORKFLOW_DATA_IO_MODE") or "auto").strip().lower()
     if mode in ("files_api", "api"):
         return True
@@ -59,7 +67,7 @@ def use_files_api_for_io() -> bool:
     if not local_mount_available():
         return True
     deploy = (os.environ.get("TEST_DEPLOYMENT_MODE") or "").strip().lower()
-    if deploy and deploy not in ("local_docker", "local"):
+    if deploy and deploy not in ("local_dev", "local_docker", "local"):
         return True
     if (os.environ.get("DATABRICKS_RUNTIME_VERSION") or "").strip():
         return True

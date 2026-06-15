@@ -32,6 +32,24 @@ set -euo pipefail
 #   password, or ARANGO_ROOT_PASSWORD_FILE=/path/to/arango-root-password.txt (first line).
 # Large fixtures: DEBUG_IMPORT_VOLUME_DIR=dbfs:/Volumes/...
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=scripts/_app_yaml_env.sh — duplicated inline for gateway (no _app_yaml_env in repo yet)
+_gateway_read_yaml() {
+  local name="$1"
+  local py="${PYTHON_BIN:-python3}"
+  local script="${SCRIPT_DIR}/scripts/read_app_yaml_env.py"
+  if [[ -f "${SCRIPT_DIR}/scripts/read_app_yaml_env.py" ]]; then
+    "${py}" "${script}" "${name}" "${SCRIPT_DIR}/app.yaml" 2>/dev/null || true
+  fi
+}
+_deploy_mode="$(_gateway_read_yaml TEST_DEPLOYMENT_MODE)"
+if [[ "${_deploy_mode}" == "local_dev" || "${_deploy_mode}" == "local_docker" || "${_deploy_mode}" == "local" ]]; then
+  echo "TEST_DEPLOYMENT_MODE=${_deploy_mode} — local run (skipping Databricks deploy)"
+  bash "${SCRIPT_DIR}/scripts/build-local.sh"
+  exec bash "${SCRIPT_DIR}/scripts/start-local-dev.sh"
+fi
+
 APP_NAME="${1:-arango-gateway-app}"
 PROFILE="${3:-}"
 
