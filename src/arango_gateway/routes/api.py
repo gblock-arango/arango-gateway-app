@@ -47,8 +47,11 @@ _ARANGO_HTTP_PROXY_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"}
 _DATABRICKS_GRAPH_UPLOAD_SUBDIR = "arango_dashboard_uploads"
 
 
-def _arango_basic_auth() -> tuple[str, str]:
-    user, password, _meta = resolve_arango_basic_auth(current_app.config)
+def _arango_basic_auth(*, registry_row: dict | None = None) -> tuple[str, str]:
+    user, password, _meta = resolve_arango_basic_auth(
+        current_app.config,
+        registry_row=registry_row,
+    )
     return user, password
 
 
@@ -189,7 +192,7 @@ def _run_arango_import(
             "skipped": True,
             "reason": "no_active_registry_row_or_invalid_endpoint",
         }
-    auth_user, auth_password = _arango_basic_auth()
+    auth_user, auth_password = _arango_basic_auth(registry_row=row)
     verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
     db = str(current_app.config.get("ARANGO_DATABASE") or "_system").strip() or "_system"
     batch = int(current_app.config.get("ARANGO_UC_IMPORT_BATCH_SIZE") or 300)
@@ -253,7 +256,7 @@ def _iter_extract_schema_ndjson(payload: dict):
         yield json.dumps({"event": "done", "result": result})
         return
 
-    auth_user, auth_password = _arango_basic_auth()
+    auth_user, auth_password = _arango_basic_auth(registry_row=row)
     verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
     db = str(current_app.config.get("ARANGO_DATABASE") or "_system").strip() or "_system"
     batch = int(current_app.config.get("ARANGO_UC_IMPORT_BATCH_SIZE") or 300)
@@ -445,7 +448,7 @@ def ping_arango_from_registry():
                 }
             ), 404
 
-        auth_user, auth_password = _arango_basic_auth()
+        auth_user, auth_password = _arango_basic_auth(registry_row=row)
         verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
 
         probe = ping_arango_endpoint(
@@ -531,7 +534,7 @@ def arango_http_proxy():
         if not base:
             return jsonify({"ok": False, "error": "invalid registry coordinates"}), 500
 
-        auth_user, auth_password = _arango_basic_auth()
+        auth_user, auth_password = _arango_basic_auth(registry_row=row)
         verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
 
         result = arango_json_request(
@@ -607,7 +610,7 @@ def arango_http_proxy_batch():
         if not base:
             return jsonify({"ok": False, "error": "invalid registry coordinates"}), 500
 
-        auth_user, auth_password = _arango_basic_auth()
+        auth_user, auth_password = _arango_basic_auth(registry_row=row)
         verify_tls = bool(current_app.config.get("ARANGO_PING_TLS_VERIFY", True))
 
         result = execute_arango_http_batch(

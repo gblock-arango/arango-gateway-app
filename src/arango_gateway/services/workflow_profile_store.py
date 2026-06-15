@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,93 @@ def load_connection_profiles_doc() -> dict[str, Any]:
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
         logger.warning("Could not read connection profiles from UC: %s", exc)
         return {}
+
+
+def _parse_server_endpoint(endpoint: str) -> tuple[str, str, int]:
+    raw = (endpoint or "").strip()
+    if not raw:
+        raise ValueError("server_endpoint is required")
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parts = urlsplit(raw)
+    host = (parts.hostname or "").strip()
+    if not host:
+        raise ValueError("server_endpoint must include a hostname")
+    protocol = (parts.scheme or "https").strip().lower()
+    port = parts.port
+    if port is None:
+        port = 443 if protocol == "https" else 80
+    return host, protocol, int(port)
+
+
+def _endpoint_has_explicit_port(server_endpoint: str) -> bool:
+    raw = (server_endpoint or "").strip()
+    if not raw:
+        return False
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    return urlsplit(raw).port is not None
+
+
+def _parse_stored_port(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+
+def _resolve_connection_target(profile: dict[str, Any]) -> tuple[str, str, int]:
+    endpoint = str(profile.get("server_endpoint") or "").strip()
+    if not endpoint:
+        raise ValueError("server_endpoint is required")
+    host, protocol, parsed_port = _parse_server_endpoint(endpoint)
+    if _endpoint_has_explicit_port(endpoint):
+        return host, protocol, parsed_port
+    explicit = _parse_stored_port(profile.get("port"))
+    if explicit is not None:
+        return host, protocol, explicit
+    return host, protocol, parsed_port
+
+
+def registry_row_from_active_profile() -> dict[str, Any] | None:
+    """
+    Build a registry-shaped row from the active Connection profile (Tier A JSON).
+
+    Used when ``local_dev`` should honor AWS/GCS/Local targets saved on the laptop
+    before or without a UC active row.
+    """
+    doc = load_connection_profiles_doc()
+    active = str(doc.get("active_profile") or "").strip().lower()
+    profiles = doc.get("profiles")
+    if not isinstance(profiles, dict) or not active:
+        return None
+    profile = profiles.get(active)
+    if not isinstance(profile, dict):
+        return None
+
+    env = str(profile.get("environment") or active).strip().lower()
+    endpoint = str(profile.get("server_endpoint") or "").strip()
+    if not endpoint:
+        if env == "local":
+            from arango_gateway.deployment_profile import static_arango_registry_row
+
+            return dict(static_arango_registry_row())
+        return None
+
+    host, protocol, port = _resolve_connection_target(profile)
+    cluster_name = str(profile.get("cluster_name") or profile.get("display_name") or active).strip()
+    return {
+        "cluster_name": cluster_name,
+        "ip_address": host,
+        "port": port,
+        "protocol": protocol,
+        "is_active": True,
+    }
 
 
 def get_active_profile_auth() -> tuple[str | None, str | None, str]:

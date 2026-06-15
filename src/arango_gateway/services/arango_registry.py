@@ -281,14 +281,22 @@ def get_active_registry_row(table_name: str, warehouse_id: str) -> dict | None:
     Relies on ``get_active_registry_entry`` (SQL ``WHERE is_active IS TRUE``) and
     double-checks the payload so an inactive row is never returned.
 
+    ``local_dev`` resolution order:
+    1. Active Connection profile (AWS / GCS / Local saved on disk)
+    2. UC active row (same as cloud)
+    3. Static Minikube row when nothing else is configured
+
     Results are cached briefly (``ARANGO_REGISTRY_CACHE_TTL_SECONDS``, default 60s)
     so high-volume ``/api/arango/http`` proxy traffic does not re-query the SQL
     warehouse on every Arango REST hop.
     """
     from arango_gateway.deployment_profile import is_local_dev, static_arango_registry_row
+    from arango_gateway.services.workflow_profile_store import registry_row_from_active_profile
 
     if is_local_dev():
-        return dict(static_arango_registry_row())
+        profile_row = registry_row_from_active_profile()
+        if profile_row:
+            return dict(profile_row)
 
     cache_key = f"{table_name}|{warehouse_id}"
     now = time.monotonic()
@@ -308,12 +316,16 @@ def get_active_registry_row(table_name: str, warehouse_id: str) -> dict | None:
         _registry_cache["at"] = now
         _registry_cache["key"] = cache_key
         _registry_cache["row"] = None
+        if is_local_dev():
+            return dict(static_arango_registry_row())
         return None
     row = rows[0]
     if not _registry_row_is_active(row):
         _registry_cache["at"] = now
         _registry_cache["key"] = cache_key
         _registry_cache["row"] = None
+        if is_local_dev():
+            return dict(static_arango_registry_row())
         return None
     _registry_cache["at"] = now
     _registry_cache["key"] = cache_key

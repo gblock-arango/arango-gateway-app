@@ -114,5 +114,44 @@ def static_arango_registry_row() -> dict[str, object]:
     }
 
 
+def is_minikube_registry_row(row: dict[str, object] | None) -> bool:
+    """True when registry coordinates target the default local Minikube Arango."""
+    if not row:
+        return False
+    cluster = str(row.get("cluster_name") or "").strip()
+    if cluster == MINIKUBE_CLUSTER_NAME:
+        return True
+    ip = str(row.get("ip_address") or "").strip().lower()
+    try:
+        port = int(row.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return ip in ("127.0.0.1", "localhost", "::1") and port == MINIKUBE_ARANGO_PORT
+
+
 def arango_ping_tls_verify_default() -> bool:
     return not is_local_dev()
+
+
+def minikube_root_password_file() -> Path | None:
+    """Resolve Minikube root password file for local_dev (no Connection profile required)."""
+    explicit = (os.environ.get("ARANGO_ROOT_PASSWORD_FILE") or "").strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+        return path if path.is_file() else None
+    candidates = [
+        _repo_root().parent.parent / "single-node-arango-on-minikube" / ".state" / "arango-root-password.txt",
+        Path.home() / "gazebo_dev" / "ARANGO" / "single-node-arango-on-minikube" / ".state" / "arango-root-password.txt",
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def read_minikube_root_password() -> str:
+    path = minikube_root_password_file()
+    if not path:
+        return ""
+    first = path.read_text(encoding="utf-8").strip().splitlines()
+    return first[0].strip() if first else ""

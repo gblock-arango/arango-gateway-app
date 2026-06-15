@@ -47,6 +47,14 @@ _deploy_mode="$(_gateway_read_yaml TEST_DEPLOYMENT_MODE)"
 if [[ "${_deploy_mode}" == "local_dev" || "${_deploy_mode}" == "local_docker" || "${_deploy_mode}" == "local" ]]; then
   echo "TEST_DEPLOYMENT_MODE=${_deploy_mode} — local run (skipping Databricks deploy)"
   bash "${SCRIPT_DIR}/scripts/build-local.sh"
+  if [[ -f "${SCRIPT_DIR}/scripts/grant-local-dev-uc.sh" ]]; then
+    if ! bash "${SCRIPT_DIR}/scripts/grant-local-dev-uc.sh"; then
+      if [[ "${GRANT_LOCAL_DEV_FAIL_DEPLOY:-}" == "1" ]]; then
+        exit 1
+      fi
+      echo "WARNING: grant-local-dev-uc.sh had failures (set GRANT_LOCAL_DEV_FAIL_DEPLOY=1 to abort)." >&2
+    fi
+  fi
   exec bash "${SCRIPT_DIR}/scripts/start-local-dev.sh"
 fi
 

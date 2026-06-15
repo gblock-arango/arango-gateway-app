@@ -30,7 +30,11 @@ def _profile_auth_cache_key(user: str, password: str, active_profile: str) -> st
     return f"{active_profile}|{user}|{len(password)}|{hash(password)}"
 
 
-def resolve_arango_basic_auth(config: Mapping[str, Any]) -> tuple[str, str, dict[str, Any]]:
+def resolve_arango_basic_auth(
+    config: Mapping[str, Any],
+    *,
+    registry_row: dict[str, Any] | None = None,
+) -> tuple[str, str, dict[str, Any]]:
     """
     Credentials for outbound Arango HTTP (proxy, embed, ping, bulk import).
 
@@ -58,14 +62,30 @@ def resolve_arango_basic_auth(config: Mapping[str, Any]) -> tuple[str, str, dict
         user = (config.get("ARANGO_PING_BASIC_AUTH_USER") or "").strip()
         password_raw = config.get("ARANGO_PING_BASIC_AUTH_PASSWORD")
         password = str(password_raw) if password_raw is not None else ""
+        meta_source = "env" if user or password else "missing"
+
+        if not user and not password:
+            from arango_gateway.deployment_profile import (
+                is_local_dev,
+                is_minikube_registry_row,
+                read_minikube_root_password,
+            )
+
+            if is_local_dev() and is_minikube_registry_row(registry_row):
+                mk_password = read_minikube_root_password()
+                if mk_password:
+                    user = "root"
+                    password = mk_password
+                    meta_source = "minikube_password_file"
+
         meta = {
-            "source": "env" if user or password else "missing",
+            "source": meta_source,
             "active_profile": active_profile or "",
             "auth_user_present": bool(user),
             "auth_password_present": bool(password),
         }
-        cache_profile = active_profile or "env"
-        if meta["source"] == "missing":
+        cache_profile = active_profile or ("minikube" if meta_source == "minikube_password_file" else "env")
+        if meta_source == "missing":
             logger.info(
                 "Arango basic auth not configured — set credentials in arango-workflow-app "
                 "Connection page (/connection) and click Connect."

@@ -36,14 +36,13 @@ def run_startup_debug_check(app) -> dict:
     table_name = app.config["ARANGO_REGISTRY_TABLE"]
     warehouse_id = app.config["DATABRICKS_SQL_WAREHOUSE_ID"]
     timeout_seconds = float(app.config.get("ARANGO_PING_TIMEOUT_SECONDS", 5.0))
-    auth_user, auth_password, auth_meta = resolve_arango_basic_auth(app.config)
     verify_tls = bool(app.config.get("ARANGO_PING_TLS_VERIFY", True))
 
     status = {
         "checked_at": _now_utc(),
         "registry_table": table_name,
         "warehouse_id_present": bool(warehouse_id),
-        "secrets": auth_meta,
+        "secrets": {"source": "pending"},
         "registry": {"status": "unknown"},
         "probe": {"status": "skipped"},
     }
@@ -53,6 +52,12 @@ def run_startup_debug_check(app) -> dict:
             ensure_registry_table(table_name=table_name, warehouse_id=warehouse_id)
 
         row = get_active_registry_row(table_name=table_name, warehouse_id=warehouse_id)
+        auth_user, auth_password, auth_meta = resolve_arango_basic_auth(
+            app.config,
+            registry_row=row,
+        )
+        status["secrets"] = auth_meta
+
         if not row:
             status["registry"] = {"status": "empty", "message": "No active row found"}
         else:
